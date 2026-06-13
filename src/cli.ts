@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { Command } from "commander";
 import { loginWithEmail, loginWithToken, logout } from "./auth.js";
 import { getConfigPath } from "./config.js";
@@ -31,12 +32,14 @@ import { addExistingUser, inviteUser, listUsers, makeAdmin, removeUser } from ".
 import type { CommandGlobals } from "./types.js";
 
 const program = new Command();
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json") as { version: string };
 type ParsedOptions = Record<string, any>;
 
 program
   .name("static-studio")
   .description("Static Studio hosting platform CLI")
-  .version("0.1.0")
+  .version(packageJson.version)
   .option("--json", "print JSON output")
   .option("--profile <name>", "configuration profile", "default");
 
