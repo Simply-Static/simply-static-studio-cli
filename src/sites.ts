@@ -197,12 +197,36 @@ export async function deleteSite(supabase: SupabaseClient, siteId: string): Prom
   return invokeFunction(supabase, "queue-site-delete", { record_id: siteId });
 }
 
+export type SitePushMode = "full" | "changes";
+export type SiteExportType = "export" | "update";
+
+export function sitePushModeToExportType(mode: string | undefined = "full"): SiteExportType {
+  switch (mode.trim().toLowerCase()) {
+    case "full":
+    case "export":
+      return "export";
+    case "changes":
+    case "update":
+      return "update";
+    default:
+      throw new CliError("Push mode must be `full` or `changes`.");
+  }
+}
+
 export async function exportSite(
   supabase: SupabaseClient,
   siteId: string,
-  type: "export" | "update" = "export",
+  type: SiteExportType = "export",
 ): Promise<unknown> {
   return invokeFunction(supabase, "export-site", { site_id: siteId, type });
+}
+
+export async function pushSite(
+  supabase: SupabaseClient,
+  siteId: string,
+  mode: string | undefined = "full",
+): Promise<unknown> {
+  return exportSite(supabase, siteId, sitePushModeToExportType(mode));
 }
 
 export async function redeploySite(supabase: SupabaseClient, siteId: string): Promise<unknown> {

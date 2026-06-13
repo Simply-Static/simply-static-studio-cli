@@ -14,13 +14,13 @@ import {
   clearCache,
   createSite,
   deleteSite,
-  exportSite,
   generateSiteSeed,
   getChangesCount,
   getSite,
   getSiteMeta,
   getSiteMigrationSubdomain,
   listSites,
+  pushSite,
   redeploySite,
   retryFailedDeployment,
   siteSummaryRows,
@@ -249,20 +249,20 @@ sites
   });
 
 sites
-  .command("export <siteId>")
-  .description("start a static export")
-  .option("--type <type>", "export type: export or update", "export")
-  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+  .command("push")
+  .description("push a static site")
+  .argument("<siteId>", "site ID")
+  .argument("[mode]", "push mode: full or changes", "full")
+  .action(async (siteId: string, mode: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      const type = opts.type === "update" ? "update" : "export";
-      print(cmd, await exportSite(supabase, siteId, type));
+      print(cmd, await pushSite(supabase, siteId, mode));
     });
   });
 
 sites
   .command("redeploy <siteId>")
   .description("redeploy an existing site")
-  .option("--migration-file <path>", "upload a replacement migration archive before redeploying")
+  .requiredOption("--migration-file <path>", "upload a replacement migration archive before redeploying")
   .option("--allow-any-zip-name", "skip Static Studio backup ZIP filename check")
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
