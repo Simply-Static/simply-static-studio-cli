@@ -4,6 +4,12 @@ import { CliError } from "./errors.js";
 import { invokeFunction } from "./supabase.js";
 import { md5, randomAlphanumeric, randomAlpha, randomDomainWord, randomPassword, randomUsername } from "./random.js";
 import type { SiteMetaRecord, SiteRecord } from "./types.js";
+import {
+  assertSafeId,
+  parsePositiveInteger,
+  requireAllowedValue,
+  sanitizeSearchTerm,
+} from "./validation.js";
 
 export interface CreateSiteOptions {
   name?: string;
@@ -50,11 +56,18 @@ export async function listSites(
     ascending?: boolean;
   } = {},
 ): Promise<{ data: SiteRecord[]; count: number }> {
-  const page = options.page || 1;
-  const pageSize = options.pageSize || 20;
+  const page = parsePositiveInteger(options.page || 1, "page", { min: 1, max: 10_000 });
+  const pageSize = parsePositiveInteger(options.pageSize || 20, "page size", { min: 1, max: 100 });
   const from = (page - 1) * pageSize;
   const to = from + pageSize - 1;
-  const orderField = options.sort || "created_at";
+  const orderField = requireAllowedValue(options.sort || "created_at", [
+    "id",
+    "name",
+    "url",
+    "status",
+    "created_at",
+    "updated_at",
+  ] as const, "sort");
   const orderAsc = options.ascending ?? false;
 
   let query = supabase
@@ -70,7 +83,7 @@ export async function listSites(
     query = query.eq("site_meta.email", user.email);
   }
 
-  const search = options.search?.trim();
+  const search = sanitizeSearchTerm(options.search);
   if (search) {
     query = query.or(`name.ilike.%${search}%,url.ilike.%${search}%`);
   }
@@ -82,14 +95,15 @@ export async function listSites(
 }
 
 export async function getSite(supabase: SupabaseClient, siteId: string): Promise<SiteRecord> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
   const { data, error } = await supabase
     .from("site")
     .select("*, site_meta(*), user_site(*)")
-    .eq("id", siteId)
+    .eq("id", safeSiteId)
     .maybeSingle();
 
   if (error) throw new CliError(error.message);
-  if (!data) throw new CliError(`Site ${siteId} was not found.`);
+  if (!data) throw new CliError(`Site ${safeSiteId} was not found.`);
   return data as SiteRecord;
 }
 
@@ -98,10 +112,11 @@ export async function getSiteMeta(
   siteId: string,
   email?: string,
 ): Promise<SiteMetaRecord> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
   let query = supabase
     .from("site_meta")
     .select("*")
-    .eq("site_id", siteId)
+    .eq("site_id", safeSiteId)
     .order("id", { ascending: false })
     .limit(1);
 
@@ -111,8 +126,31 @@ export async function getSiteMeta(
 
   const { data, error } = await query.maybeSingle();
   if (error) throw new CliError(error.message);
-  if (!data) throw new CliError(`No site_meta record found for site ${siteId}.`);
+  if (!data) throw new CliError(`No site_meta record found for site ${safeSiteId}.`);
   return data as SiteMetaRecord;
+}
+
+export function basicAuthCredentialsFromMeta(meta: SiteMetaRecord): {
+  basic_auth_user: string;
+  basic_auth_password: string;
+  admin_url?: string;
+} {
+  if (!meta.basic_auth_user || !meta.basic_auth_password) {
+    throw new CliError("Basic Auth credentials were not found for this site.");
+  }
+  return {
+    basic_auth_user: meta.basic_auth_user,
+    basic_auth_password: meta.basic_auth_password,
+    ...(meta.admin_url ? { admin_url: meta.admin_url } : {}),
+  };
+}
+
+export async function getBasicAuthCredentials(
+  supabase: SupabaseClient,
+  siteId: string,
+  email?: string,
+): Promise<ReturnType<typeof basicAuthCredentialsFromMeta>> {
+  return basicAuthCredentialsFromMeta(await getSiteMeta(supabase, siteId, email));
 }
 
 export async function createSite(
@@ -180,6 +218,7 @@ export async function updateSite(
   siteId: string,
   changes: { name?: string; notes?: string; status?: string },
 ): Promise<SiteRecord> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
   const update: Record<string, string> = {};
   if (changes.name !== undefined) update.name = changes.name;
   if (changes.notes !== undefined) update.notes = changes.notes;
@@ -188,13 +227,13 @@ export async function updateSite(
     throw new CliError("No changes supplied.");
   }
 
-  const { data, error } = await supabase.from("site").update(update).eq("id", siteId).select().single();
+  const { data, error } = await supabase.from("site").update(update).eq("id", safeSiteId).select().single();
   if (error) throw new CliError(error.message);
   return data as SiteRecord;
 }
 
 export async function deleteSite(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  return invokeFunction(supabase, "queue-site-delete", { record_id: siteId });
+  return invokeFunction(supabase, "queue-site-delete", { record_id: assertSafeId(siteId, "siteId") });
 }
 
 export type SitePushMode = "full" | "changes";
@@ -218,7 +257,7 @@ export async function exportSite(
   siteId: string,
   type: SiteExportType = "export",
 ): Promise<unknown> {
-  return invokeFunction(supabase, "export-site", { site_id: siteId, type });
+  return invokeFunction(supabase, "export-site", { site_id: assertSafeId(siteId, "siteId"), type });
 }
 
 export async function pushSite(
@@ -256,18 +295,18 @@ export async function getSiteMigrationSubdomain(
 }
 
 export async function retryFailedDeployment(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  return invokeFunction(supabase, "retry-failed-deployment", { site_id: siteId });
+  return invokeFunction(supabase, "retry-failed-deployment", { site_id: assertSafeId(siteId, "siteId") });
 }
 
 export async function getChangesCount(supabase: SupabaseClient, siteId: string): Promise<number> {
   const result = await invokeFunction<{ data?: { changes_count?: number } }>(supabase, "get-changes-count", {
-    site_id: siteId,
+    site_id: assertSafeId(siteId, "siteId"),
   });
   return result?.data?.changes_count || 0;
 }
 
 export async function clearCache(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  return invokeFunction(supabase, "clear-cache", { siteId });
+  return invokeFunction(supabase, "clear-cache", { siteId: assertSafeId(siteId, "siteId") });
 }
 
 export function siteSummaryRows(sites: SiteRecord[]): Record<string, unknown>[] {

@@ -47,6 +47,9 @@ static-studio status
 
 static-studio sites list
 static-studio sites get <siteId>
+static-studio sites credentials <siteId>
+static-studio sites basic-auth <siteId>
+static-studio sites debug-log <siteId> --tail 200
 static-studio sites create --name Demo --subdomain demo123
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
 static-studio sites push <siteId> full
@@ -67,6 +70,30 @@ static-studio redirects create <siteId> /old /new
 static-studio redirects bulk-create <siteId> redirects.json
 
 static-studio users invite <siteId> person@example.com --role administrator
+static-studio team list
+static-studio team invite person@example.com teammate@example.com --role editor --invite-missing
+static-studio team bulk-invite emails.txt --role editor --invite-missing
+
+static-studio account usage --include-subscription
+
+static-studio performance run <siteId> --force
+static-studio performance stats <siteId>
+static-studio performance get <siteId>
+static-studio performance reports <siteId>
+
+static-studio logs get <siteId> --tail 200 --level error
+
+static-studio environments list <siteId>
+static-studio environments enable <siteId>
+static-studio environments create <siteId> staging
+static-studio environments delete <siteId> staging --yes
+static-studio environments disable <siteId> --yes
+
+static-studio tags list
+static-studio tags create Client --color '#3858E9'
+static-studio tags assign <siteId> <tagId>
+static-studio tags remove <siteId> <tagId>
+
 static-studio ssh add <siteId> --key-file ~/.ssh/id_ed25519.pub
 ```
 
@@ -80,6 +107,8 @@ npm audit
 ```
 
 The CLI is implemented in TypeScript, bundles to ESM with `tsup`, and exports a reusable client/workflow layer from `src/index.ts`.
+
+CI runs type checking, tests, build, and `npm audit --audit-level=high` on every push and pull request.
 
 ## Publishing
 

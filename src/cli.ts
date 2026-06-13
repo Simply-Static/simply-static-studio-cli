@@ -2,11 +2,21 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { Command } from "commander";
+import { getAccountUsage } from "./account.js";
 import { loginWithEmail, loginWithToken, logout } from "./auth.js";
 import { getConfigPath } from "./config.js";
 import { addDomain, getHostnames, issueSsl, removeDomain, setPrimaryDomain } from "./domains.js";
+import {
+  createEnvironment,
+  deleteEnvironment,
+  disableEnvironments,
+  enableEnvironments,
+  getEnvironmentStatus,
+} from "./environments.js";
 import { CliError } from "./errors.js";
+import { getDebugLog } from "./logs.js";
 import { printValue } from "./output.js";
+import { getSiteStatistics, listPerformanceReports, runPerformanceTest } from "./performance.js";
 import { confirm } from "./prompt.js";
 import { deleteSshKey, getSshInfo, listBackups, queueBackup, queueSshKey } from "./queues.js";
 import { bulkCreateRedirects, createRedirect, deleteRedirect, listRedirects } from "./redirects.js";
@@ -15,6 +25,7 @@ import {
   createSite,
   deleteSite,
   generateSiteSeed,
+  getBasicAuthCredentials,
   getChangesCount,
   getSite,
   getSiteMeta,
@@ -27,8 +38,11 @@ import {
   updateSite,
 } from "./sites.js";
 import { getAuthContext, invokeFunction } from "./supabase.js";
+import { assignTagToSite, createTag, deleteTag, listSiteTags, listTags, removeTagFromSite, updateTag } from "./tags.js";
+import { bulkInviteTeamMembers, listTeamMembers, parseEmailInputFile, removeTeamMember } from "./team.js";
 import { uploadMigrationFile } from "./upload.js";
 import { addExistingUser, inviteUser, listUsers, makeAdmin, removeUser } from "./users.js";
+import { normalizeEmailList, parsePositiveInteger } from "./validation.js";
 import type { CommandGlobals } from "./types.js";
 
 const program = new Command();
@@ -57,6 +71,40 @@ async function withAuth<T>(
 
 function print(command: Command, value: unknown): void {
   printValue(value, { json: Boolean(globals(command).json) });
+}
+
+function debugLogOptions(opts: ParsedOptions) {
+  return {
+    ...(opts.tail ? { tail: Number(opts.tail) } : {}),
+    ...(opts.level ? { level: opts.level } : {}),
+    ...(opts.search ? { search: opts.search } : {}),
+    ...(opts.outputFile ? { outputFile: opts.outputFile } : {}),
+    ...(opts.overwrite ? { overwriteOutput: true } : {}),
+    ...(opts.timeout ? { timeoutMs: Number(opts.timeout) * 1000 } : {}),
+    ...(opts.maxBytes ? { maxBytes: Number(opts.maxBytes) } : {}),
+    ...(opts.newestFirst ? { newestFirst: true } : {}),
+    ...(opts.allowInsecureHttp ? { allowInsecureHttp: true } : {}),
+    ...(opts.allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
+  };
+}
+
+function printDebugLogResult(cmd: Command, result: Awaited<ReturnType<typeof getDebugLog>>, outputFile?: string): void {
+  if (globals(cmd).json) {
+    print(cmd, result);
+    return;
+  }
+  if (outputFile) {
+    const { log: _log, ...metadata } = result;
+    print(cmd, { ...metadata, outputFile });
+    return;
+  }
+  print(cmd, result.log);
+}
+
+async function collectTeamEmails(emails: string[] | undefined, file: string | undefined, maxEmails: number): Promise<string[]> {
+  const fromArgs = emails && emails.length > 0 ? normalizeEmailList(emails, { max: maxEmails }) : [];
+  const fromFile = file ? await parseEmailInputFile(file, maxEmails) : [];
+  return normalizeEmailList([...fromArgs, ...fromFile], { max: maxEmails });
 }
 
 program
@@ -169,6 +217,36 @@ sites
   .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
       print(cmd, await getSiteMeta(supabase, siteId, user.email || undefined));
+    });
+  });
+
+sites
+  .command("basic-auth <siteId>")
+  .description("show Basic Auth credentials for a site")
+  .option("--email <email>", "site_meta email to use instead of the authenticated user")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await getBasicAuthCredentials(supabase, siteId, opts.email || user.email || undefined));
+    });
+  });
+
+sites
+  .command("debug-log <siteId>")
+  .description("fetch the WordPress debug log for a site")
+  .option("--tail <lines>", "return only the last N lines")
+  .option("--level <level>", "filter by level: all, error, warning, notice, info", "all")
+  .option("--search <term>", "return only lines containing this text")
+  .option("--newest-first", "reverse log lines before printing")
+  .option("--output-file <path>", "write log text to a local file with 0600 permissions")
+  .option("--overwrite", "replace --output-file if it already exists")
+  .option("--timeout <seconds>", "network timeout in seconds", "30")
+  .option("--max-bytes <bytes>", "maximum response size", String(5 * 1024 * 1024))
+  .option("--allow-insecure-http", "allow fetching logs over HTTP")
+  .option("--allow-private-network", "allow fetching logs from local or private network hosts")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const result = await getDebugLog(supabase, siteId, debugLogOptions(opts));
+      printDebugLogResult(cmd, result, opts.outputFile);
     });
   });
 
@@ -366,6 +444,225 @@ domains
     });
   });
 
+const account = program.command("account").description("show account usage and subscription data");
+
+account
+  .command("usage")
+  .description("show account storage, bandwidth, and site counts")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .option("--include-subscription", "include latest subscription row")
+  .action(async (opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await getAccountUsage(supabase, opts.accountId || user.id, {
+        includeSubscription: Boolean(opts.includeSubscription),
+      }));
+    });
+  });
+
+const performance = program.command("performance").description("run and inspect performance data");
+
+performance
+  .command("run <siteId>")
+  .description("run a PageSpeed and global TTFB performance test")
+  .option("--force", "ignore cached PageSpeed report")
+  .option("--url <url>", "test a URL instead of the stored site URL")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await runPerformanceTest(supabase, siteId, {
+        ...(opts.url ? { url: opts.url } : {}),
+        force: Boolean(opts.force),
+      }));
+    });
+  });
+
+performance
+  .command("stats <siteId>")
+  .description("get CDN bandwidth, storage, cache, and response-time statistics")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getSiteStatistics(supabase, siteId));
+    });
+  });
+
+performance
+  .command("get <siteId>")
+  .description("run a performance test and fetch CDN statistics")
+  .option("--force", "ignore cached PageSpeed report")
+  .option("--url <url>", "test a URL instead of the stored site URL")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const [pagespeed, statistics] = await Promise.all([
+        runPerformanceTest(supabase, siteId, {
+          ...(opts.url ? { url: opts.url } : {}),
+          force: Boolean(opts.force),
+        }),
+        getSiteStatistics(supabase, siteId),
+      ]);
+      print(cmd, { pagespeed, statistics });
+    });
+  });
+
+performance
+  .command("reports <siteId>")
+  .description("list cached PageSpeed reports")
+  .option("--limit <number>", "number of reports", "10")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listPerformanceReports(supabase, siteId, parsePositiveInteger(opts.limit, "limit", { min: 1, max: 100 })));
+    });
+  });
+
+const logs = program.command("logs").description("fetch site logs");
+
+logs
+  .command("get <siteId>")
+  .description("fetch the WordPress debug log for a site")
+  .option("--tail <lines>", "return only the last N lines")
+  .option("--level <level>", "filter by level: all, error, warning, notice, info", "all")
+  .option("--search <term>", "return only lines containing this text")
+  .option("--newest-first", "reverse log lines before printing")
+  .option("--output-file <path>", "write log text to a local file with 0600 permissions")
+  .option("--overwrite", "replace --output-file if it already exists")
+  .option("--timeout <seconds>", "network timeout in seconds", "30")
+  .option("--max-bytes <bytes>", "maximum response size", String(5 * 1024 * 1024))
+  .option("--allow-insecure-http", "allow fetching logs over HTTP")
+  .option("--allow-private-network", "allow fetching logs from local or private network hosts")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const result = await getDebugLog(supabase, siteId, debugLogOptions(opts));
+      printDebugLogResult(cmd, result, opts.outputFile);
+    });
+  });
+
+const environments = program.command("environments").description("manage site environments");
+
+environments
+  .command("list <siteId>")
+  .description("list environments and add-on status")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getEnvironmentStatus(supabase, siteId));
+    });
+  });
+
+environments
+  .command("enable <siteId>")
+  .description("enable environment management for a site")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await enableEnvironments(supabase, siteId));
+    });
+  });
+
+environments
+  .command("create <siteId> <name>")
+  .description("create a child environment")
+  .action(async (siteId: string, name: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await createEnvironment(supabase, siteId, name));
+    });
+  });
+
+environments
+  .command("delete <siteId> <name>")
+  .description("delete a child environment")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, name: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Delete environment ${name} for site ${siteId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await deleteEnvironment(supabase, siteId, name));
+    });
+  });
+
+environments
+  .command("disable <siteId>")
+  .description("disable environments and remove child environments")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Disable environments for site ${siteId}? This deletes child environments.`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await disableEnvironments(supabase, siteId));
+    });
+  });
+
+const tags = program.command("tags").description("manage account tags and site tag assignments");
+
+tags
+  .command("list")
+  .description("list account tags")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .action(async (opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await listTags(supabase, opts.accountId || user.id));
+    });
+  });
+
+tags
+  .command("site <siteId>")
+  .description("list tags assigned to a site")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listSiteTags(supabase, siteId));
+    });
+  });
+
+tags
+  .command("create <name>")
+  .description("create an account tag")
+  .option("--color <hex>", "tag color", "#3858E9")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .action(async (name: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await createTag(supabase, opts.accountId || user.id, name, opts.color));
+    });
+  });
+
+tags
+  .command("update <tagId>")
+  .description("update a tag name or color")
+  .option("--name <name>", "new tag name")
+  .option("--color <hex>", "new tag color")
+  .action(async (tagId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await updateTag(supabase, tagId, opts));
+    });
+  });
+
+tags
+  .command("delete <tagId>")
+  .description("delete a tag")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (tagId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Delete tag ${tagId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await deleteTag(supabase, tagId));
+    });
+  });
+
+tags
+  .command("assign <siteId> <tagId>")
+  .description("assign a tag to a site")
+  .action(async (siteId: string, tagId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await assignTagToSite(supabase, siteId, tagId));
+    });
+  });
+
+tags
+  .command("remove <siteId> <tagId>")
+  .description("remove a tag from a site")
+  .action(async (siteId: string, tagId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await removeTagFromSite(supabase, siteId, tagId));
+    });
+  });
+
 const backups = program.command("backups").description("manage site backups");
 
 backups
@@ -506,6 +803,72 @@ users
   .action(async (siteId: string, userId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await makeAdmin(supabase, siteId, userId));
+    });
+  });
+
+const team = program.command("team").description("manage account team members");
+
+team
+  .command("list")
+  .description("list account team members")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .action(async (opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await listTeamMembers(supabase, opts.accountId || user.id));
+    });
+  });
+
+team
+  .command("invite [emails...]")
+  .description("bulk add existing Studio users, optionally inviting missing users to owned sites")
+  .option("--file <path>", "JSON, CSV, or newline-separated email list")
+  .option("--role <role>", "WordPress role for site access", "editor")
+  .option("--invite-missing", "send invites to emails that are not existing Studio users")
+  .option("--max-emails <number>", "maximum unique emails to process", "100")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .action(async (emails: string[] | undefined, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      const maxEmails = parsePositiveInteger(opts.maxEmails, "max emails", { min: 1, max: 100 });
+      const collectedEmails = await collectTeamEmails(emails, opts.file, maxEmails);
+      print(cmd, await bulkInviteTeamMembers(supabase, opts.accountId || user.id, collectedEmails, {
+        role: opts.role,
+        inviteMissing: Boolean(opts.inviteMissing),
+        maxEmails,
+      }));
+    });
+  });
+
+team
+  .command("bulk-invite <file>")
+  .description("bulk add or invite team members from a JSON, CSV, or newline-separated email file")
+  .option("--role <role>", "WordPress role for site access", "editor")
+  .option("--invite-missing", "send invites to emails that are not existing Studio users")
+  .option("--max-emails <number>", "maximum unique emails to process", "100")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .action(async (file: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      const maxEmails = parsePositiveInteger(opts.maxEmails, "max emails", { min: 1, max: 100 });
+      const emails = await parseEmailInputFile(file, maxEmails);
+      print(cmd, await bulkInviteTeamMembers(supabase, opts.accountId || user.id, emails, {
+        role: opts.role,
+        inviteMissing: Boolean(opts.inviteMissing),
+        maxEmails,
+      }));
+    });
+  });
+
+team
+  .command("remove <memberId>")
+  .description("remove a member from the account team and owned sites")
+  .option("--email <email>", "member email; looked up by ID if omitted")
+  .option("--account-id <id>", "account owner ID; defaults to the authenticated user")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (memberId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Remove team member ${memberId} from the account and owned sites?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await removeTeamMember(supabase, opts.accountId || user.id, memberId, opts.email));
     });
   });
 

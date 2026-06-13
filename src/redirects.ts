@@ -3,6 +3,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { CliError } from "./errors.js";
 import { invokeFunction } from "./supabase.js";
 import { getSite } from "./sites.js";
+import { assertReadableFileWithinLimit, assertSafeId } from "./validation.js";
+
+const MAX_BULK_REDIRECTS = 1000;
+const MAX_BULK_REDIRECT_FILE_BYTES = 512 * 1024;
 
 function cleanHost(url: string): string {
   return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
@@ -14,7 +18,8 @@ async function resolveRedirectContext(
   pullZoneId?: string,
   domain?: string,
 ): Promise<{ pullZoneId: string; domain: string }> {
-  const site = await getSite(supabase, siteId);
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const site = await getSite(supabase, safeSiteId);
   const resolvedPullZoneId = pullZoneId || site.pull_zone_id;
   if (!resolvedPullZoneId) {
     throw new CliError("Site does not have a pull_zone_id yet.");
@@ -30,10 +35,11 @@ export async function listRedirects(
   siteId: string,
   pullZoneId?: string,
 ): Promise<unknown> {
-  const context = await resolveRedirectContext(supabase, siteId, pullZoneId);
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const context = await resolveRedirectContext(supabase, safeSiteId, pullZoneId);
   return invokeFunction(supabase, "get-redirects", {
     pullZoneId: context.pullZoneId,
-    siteId,
+    siteId: safeSiteId,
   });
 }
 
@@ -44,13 +50,14 @@ export async function createRedirect(
   toPath: string,
   options: { pullZoneId?: string; domain?: string } = {},
 ): Promise<unknown> {
-  const context = await resolveRedirectContext(supabase, siteId, options.pullZoneId, options.domain);
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const context = await resolveRedirectContext(supabase, safeSiteId, options.pullZoneId, options.domain);
   return invokeFunction(supabase, "create-redirect", {
     fromPath,
     toPath,
     pullZoneId: context.pullZoneId,
     domain: context.domain,
-    siteId,
+    siteId: safeSiteId,
   });
 }
 
@@ -60,13 +67,14 @@ export async function deleteRedirect(
   ruleId: string,
   pullZoneId?: string,
 ): Promise<unknown> {
-  const context = await resolveRedirectContext(supabase, siteId, pullZoneId);
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const context = await resolveRedirectContext(supabase, safeSiteId, pullZoneId);
   const result = await invokeFunction(supabase, "disable-redirect", {
     pullZoneId: context.pullZoneId,
     ruleId,
-    siteId,
+    siteId: safeSiteId,
   });
-  await invokeFunction(supabase, "refresh-edge-rules", { siteId });
+  await invokeFunction(supabase, "refresh-edge-rules", { siteId: safeSiteId });
   return result;
 }
 
@@ -76,14 +84,31 @@ export async function bulkCreateRedirects(
   filePath: string,
   options: { pullZoneId?: string; domain?: string } = {},
 ): Promise<unknown> {
-  const context = await resolveRedirectContext(supabase, siteId, options.pullZoneId, options.domain);
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const context = await resolveRedirectContext(supabase, safeSiteId, options.pullZoneId, options.domain);
+  await assertReadableFileWithinLimit(filePath, MAX_BULK_REDIRECT_FILE_BYTES);
   const redirects = JSON.parse(await readFile(filePath, "utf8"));
   if (!Array.isArray(redirects)) {
     throw new CliError("Bulk redirect file must contain a JSON array.");
   }
+  if (redirects.length > MAX_BULK_REDIRECTS) {
+    throw new CliError(`Bulk redirect file cannot contain more than ${MAX_BULK_REDIRECTS} redirects.`);
+  }
+  for (const redirect of redirects) {
+    if (!redirect || typeof redirect !== "object") {
+      throw new CliError("Each bulk redirect must be an object.");
+    }
+    const record = redirect as { fromPath?: unknown; toPath?: unknown };
+    if (typeof record.fromPath !== "string" || typeof record.toPath !== "string") {
+      throw new CliError("Each bulk redirect must include string fromPath and toPath values.");
+    }
+    if (record.fromPath.length > 2048 || record.toPath.length > 2048) {
+      throw new CliError("Redirect paths must be 2048 characters or fewer.");
+    }
+  }
 
   return invokeFunction(supabase, "bulk-create-redirects", {
-    siteId,
+    siteId: safeSiteId,
     pullZoneId: context.pullZoneId,
     domain: context.domain,
     redirects,
