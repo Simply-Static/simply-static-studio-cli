@@ -80,3 +80,15 @@ npm audit
 ```
 
 The CLI is implemented in TypeScript, bundles to ESM with `tsup`, and exports a reusable client/workflow layer from `src/index.ts`.
+
+## Publishing
+
+This package is scoped and intended to be public on npm. Before publishing, make sure the npm account has publish access to the `@simply-static` organization.
+
+```bash
+npm login
+npm version patch
+npm publish --access public
+```
+
+Use `npm pack --dry-run` to inspect exactly which files will be published.
