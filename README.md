@@ -49,8 +49,8 @@ static-studio sites list
 static-studio sites get <siteId>
 static-studio sites create --name Demo --subdomain demo123
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
-static-studio sites export <siteId>
-static-studio sites redeploy <siteId>
+static-studio sites push <siteId> full
+static-studio sites push <siteId> changes
 static-studio sites redeploy <siteId> --migration-file ./site-studio-backup.zip
 static-studio sites delete <siteId> --yes
 
