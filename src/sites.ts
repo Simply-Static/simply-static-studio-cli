@@ -153,6 +153,56 @@ export async function getBasicAuthCredentials(
   return basicAuthCredentialsFromMeta(await getSiteMeta(supabase, siteId, email));
 }
 
+function stripUrlCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password) {
+      parsed.username = "";
+      parsed.password = "";
+      return parsed.toString();
+    }
+  } catch {
+    return url;
+  }
+  return url;
+}
+
+export async function getMagicLoginLink(
+  supabase: SupabaseClient,
+  siteId: string,
+  email?: string,
+): Promise<{ url: string; siteId: string; staticSiteId: string; email: string }> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const [site, meta] = await Promise.all([
+    getSite(supabase, safeSiteId),
+    getSiteMeta(supabase, safeSiteId, email),
+  ]);
+  const staticSiteId = site.static_site_record_id ? String(site.static_site_record_id) : "";
+  if (!staticSiteId) {
+    throw new CliError(`Site ${safeSiteId} is missing static_site_record_id.`);
+  }
+  if (!meta.email) {
+    throw new CliError(`No site_meta email found for site ${safeSiteId}.`);
+  }
+
+  const result = await invokeFunction<{ url?: string }>(supabase, "get-magic-link", {
+    siteId: safeSiteId,
+    staticSiteId,
+    email: meta.email,
+  });
+
+  if (!result?.url) {
+    throw new CliError("Could not extract a valid login URL from WordPress response.");
+  }
+
+  return {
+    url: stripUrlCredentials(result.url),
+    siteId: safeSiteId,
+    staticSiteId,
+    email: meta.email,
+  };
+}
+
 export async function createSite(
   supabase: SupabaseClient,
   options: CreateSiteOptions,

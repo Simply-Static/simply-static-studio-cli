@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_TLD } from "./constants.js";
 import { CliError } from "./errors.js";
-import { basicAuthCredentialsFromMeta, generateSiteSeed, listSites, sitePushModeToExportType } from "./sites.js";
+import {
+  basicAuthCredentialsFromMeta,
+  generateSiteSeed,
+  getMagicLoginLink,
+  listSites,
+  sitePushModeToExportType,
+} from "./sites.js";
 import { createSupabaseMock } from "./test-utils.js";
 
 describe("generateSiteSeed", () => {
@@ -71,6 +77,44 @@ describe("basicAuthCredentialsFromMeta", () => {
 
   it("rejects missing Basic Auth credentials", () => {
     expect(() => basicAuthCredentialsFromMeta({})).toThrow(CliError);
+  });
+});
+
+describe("getMagicLoginLink", () => {
+  it("calls the dashboard magic-link function and strips embedded URL credentials", async () => {
+    const { supabase, functionCalls } = createSupabaseMock((table) => {
+      if (table === "site") {
+        return {
+          data: { id: "site-1", static_site_record_id: "static-1" },
+          error: null,
+        };
+      }
+      if (table === "site_meta") {
+        return {
+          data: { site_id: "site-1", email: "person@example.com" },
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    }, { url: "https://basic-user:basic-pass@wp.example.test/wp-admin/?token=abc" });
+
+    await expect(getMagicLoginLink(supabase, "site-1", "person@example.com")).resolves.toEqual({
+      url: "https://wp.example.test/wp-admin/?token=abc",
+      siteId: "site-1",
+      staticSiteId: "static-1",
+      email: "person@example.com",
+    });
+
+    expect(functionCalls).toEqual([
+      {
+        name: "get-magic-link",
+        body: {
+          siteId: "site-1",
+          staticSiteId: "static-1",
+          email: "person@example.com",
+        },
+      },
+    ]);
   });
 });
 

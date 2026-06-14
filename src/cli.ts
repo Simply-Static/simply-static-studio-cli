@@ -27,8 +27,8 @@ import {
   generateSiteSeed,
   getBasicAuthCredentials,
   getChangesCount,
+  getMagicLoginLink,
   getSite,
-  getSiteMeta,
   getSiteMigrationSubdomain,
   listSites,
   pushSite,
@@ -212,21 +212,23 @@ sites
   });
 
 sites
-  .command("credentials <siteId>")
-  .description("show WordPress/admin credentials stored for the current user")
-  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
-    await withAuth(cmd, async ({ supabase, user }) => {
-      print(cmd, await getSiteMeta(supabase, siteId, user.email || undefined));
-    });
-  });
-
-sites
   .command("basic-auth <siteId>")
   .description("show Basic Auth credentials for a site")
   .option("--email <email>", "site_meta email to use instead of the authenticated user")
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
       print(cmd, await getBasicAuthCredentials(supabase, siteId, opts.email || user.email || undefined));
+    });
+  });
+
+sites
+  .command("magic-login <siteId>")
+  .description("generate a short-lived WordPress magic login link")
+  .option("--email <email>", "site_meta email to use instead of the authenticated user")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      const result = await getMagicLoginLink(supabase, siteId, opts.email || user.email || undefined);
+      print(cmd, globals(cmd).json ? result : result.url);
     });
   });
 
@@ -788,21 +790,30 @@ users
   });
 
 users
-  .command("remove <siteId> <userId>")
+  .command("remove <siteId> <user>")
   .description("remove a user from a site")
-  .requiredOption("--email <email>", "user email")
-  .action(async (siteId: string, userId: string, opts: ParsedOptions, cmd: Command) => {
+  .option("--email <email>", "user email; only needed when <user> is a user ID that cannot be resolved")
+  .action(async (siteId: string, user: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await removeUser(supabase, siteId, userId, opts.email));
+      print(cmd, await removeUser(supabase, siteId, user, opts.email));
     });
   });
 
 users
-  .command("make-admin <siteId> <userId>")
+  .command("make-admin <siteId> <user>")
   .description("make a site user the admin")
-  .action(async (siteId: string, userId: string, _localOpts: ParsedOptions, cmd: Command) => {
+  .action(async (siteId: string, user: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await makeAdmin(supabase, siteId, userId));
+      print(cmd, await makeAdmin(supabase, siteId, user));
+    });
+  });
+
+users
+  .command("set-admin <siteId> <user>")
+  .description("make a site user the admin")
+  .action(async (siteId: string, user: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await makeAdmin(supabase, siteId, user));
     });
   });
 
