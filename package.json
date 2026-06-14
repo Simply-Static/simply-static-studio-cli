@@ -1,6 +1,6 @@
 {
   "name": "@simply-static/studio-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Command-line interface for Static Studio hosting workflows.",
   "license": "MIT",
   "type": "module",
