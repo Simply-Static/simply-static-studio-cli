@@ -14,6 +14,30 @@ export class CliError extends Error {
   }
 }
 
+export function cliErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function cliErrorExitCode(error: unknown): number {
+  return error instanceof CliError ? error.exitCode : 1;
+}
+
+export function cliErrorJson(error: unknown): {
+  error: {
+    message: string;
+    name: string;
+    exitCode: number;
+  };
+} {
+  return {
+    error: {
+      message: cliErrorMessage(error),
+      name: error instanceof Error ? error.name : "Error",
+      exitCode: cliErrorExitCode(error),
+    },
+  };
+}
+
 export async function resolveFunctionError(error: unknown): Promise<Error> {
   if (error instanceof FunctionsHttpError) {
     const context = error.context as Response;

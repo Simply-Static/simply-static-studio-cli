@@ -13,7 +13,7 @@ import {
   enableEnvironments,
   getEnvironmentStatus,
 } from "./environments.js";
-import { CliError } from "./errors.js";
+import { CliError, cliErrorExitCode, cliErrorJson, cliErrorMessage } from "./errors.js";
 import { getDebugLog } from "./logs.js";
 import { printValue } from "./output.js";
 import { getSiteStatistics, listPerformanceReports, runPerformanceTest } from "./performance.js";
@@ -938,12 +938,19 @@ ssh
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {
+  const wantsJson = Boolean(program.opts().json);
+
   if (error instanceof CliError && error.exitCode === 0) {
-    process.stderr.write(`${error.message}\n`);
+    process.stderr.write(
+      wantsJson ? `${JSON.stringify(cliErrorJson(error), null, 2)}\n` : `${error.message}\n`,
+    );
     process.exit(0);
   }
 
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`Error: ${message}\n`);
-  process.exit(error instanceof CliError ? error.exitCode : 1);
+  if (wantsJson) {
+    process.stderr.write(`${JSON.stringify(cliErrorJson(error), null, 2)}\n`);
+  } else {
+    process.stderr.write(`Error: ${cliErrorMessage(error)}\n`);
+  }
+  process.exit(cliErrorExitCode(error));
 });
