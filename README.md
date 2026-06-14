@@ -101,6 +101,15 @@ static-studio tags remove <siteId> <tagId>
 static-studio ssh add <siteId> --key-file ~/.ssh/id_ed25519.pub
 ```
 
+## Documentation
+
+Detailed CLI documentation lives in [`docs/`](docs/README.md):
+
+- [`docs/authentication-and-configuration.md`](docs/authentication-and-configuration.md)
+- [`docs/command-reference.md`](docs/command-reference.md)
+- [`docs/input-formats-and-limits.md`](docs/input-formats-and-limits.md)
+- [`docs/workflows.md`](docs/workflows.md)
+
 ## Development
 
 ```bash
