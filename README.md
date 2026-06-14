@@ -47,8 +47,8 @@ static-studio status
 
 static-studio sites list
 static-studio sites get <siteId>
-static-studio sites credentials <siteId>
 static-studio sites basic-auth <siteId>
+static-studio sites magic-login <siteId>
 static-studio sites debug-log <siteId> --tail 200
 static-studio sites create --name Demo --subdomain demo123
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
@@ -69,7 +69,11 @@ static-studio backups restore <siteId> --backup-id <backupId>
 static-studio redirects create <siteId> /old /new
 static-studio redirects bulk-create <siteId> redirects.json
 
+static-studio users list <siteId>
 static-studio users invite <siteId> person@example.com --role administrator
+static-studio users add <siteId> person@example.com --role editor
+static-studio users remove <siteId> person@example.com
+static-studio users set-admin <siteId> person@example.com
 static-studio team list
 static-studio team invite person@example.com teammate@example.com --role editor --invite-missing
 static-studio team bulk-invite emails.txt --role editor --invite-missing

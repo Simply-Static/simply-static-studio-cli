@@ -51,6 +51,59 @@ export async function findUserByEmail(
   return data as { id: string; email: string } | null;
 }
 
+async function findUserById(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<{ id: string; email: string } | null> {
+  const safeUserId = assertSafeId(userId, "userId");
+  const { data, error } = await supabase.from("user").select("id, email").eq("id", safeUserId).maybeSingle();
+  if (error) throw new CliError(error.message);
+  return data as { id: string; email: string } | null;
+}
+
+async function resolveSiteUser(
+  supabase: SupabaseClient,
+  siteId: string,
+  target: string,
+  email?: string,
+): Promise<{ userId?: string; email: string }> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const targetValue = String(target || "").trim();
+  if (targetValue.includes("@")) {
+    const cleanEmail = normalizeEmail(targetValue);
+    const { data, error } = await supabase
+      .from("user_site")
+      .select("user_id, email")
+      .eq("site_id", safeSiteId)
+      .eq("email", cleanEmail)
+      .maybeSingle();
+    if (error) throw new CliError(error.message);
+    return {
+      ...((data as { user_id?: string } | null)?.user_id
+        ? { userId: String((data as { user_id: string }).user_id) }
+        : {}),
+      email: cleanEmail,
+    };
+  }
+
+  const safeUserId = assertSafeId(targetValue, "userId");
+  const { data, error } = await supabase
+    .from("user_site")
+    .select("user_id, email")
+    .eq("site_id", safeSiteId)
+    .eq("user_id", safeUserId)
+    .maybeSingle();
+  if (error) throw new CliError(error.message);
+
+  const row = data as { user_id?: string; email?: string } | null;
+  const resolvedEmail = email ? normalizeEmail(email) : row?.email || (await findUserById(supabase, safeUserId))?.email;
+  if (!resolvedEmail) {
+    throw new CliError("Could not resolve user email. Provide --email or pass the user email as the user argument.");
+  }
+
+  return { userId: safeUserId, email: resolvedEmail };
+}
+
 export async function inviteUser(
   supabase: SupabaseClient,
   siteId: string,
@@ -100,47 +153,52 @@ export async function addExistingUser(
 export async function removeUser(
   supabase: SupabaseClient,
   siteId: string,
-  userId: string,
-  email: string,
+  user: string,
+  email?: string,
 ): Promise<unknown> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  const safeUserId = assertSafeId(userId, "userId");
-  const cleanEmail = normalizeEmail(email);
-  const { error: userSiteError } = await supabase
+  const resolved = await resolveSiteUser(supabase, safeSiteId, user, email);
+  let userSiteQuery = supabase
     .from("user_site")
     .delete()
-    .eq("site_id", safeSiteId)
-    .eq("user_id", safeUserId);
+    .eq("site_id", safeSiteId);
+  userSiteQuery = resolved.userId
+    ? userSiteQuery.eq("user_id", resolved.userId)
+    : userSiteQuery.eq("email", resolved.email);
+  const { error: userSiteError } = await userSiteQuery;
   if (userSiteError) throw new CliError(userSiteError.message);
 
   await invokeFunction(supabase, "manage-user", {
     site_id: safeSiteId,
-    email: cleanEmail,
+    email: resolved.email,
     role: "",
     action: "delete",
-    site_user_id: safeUserId,
+    ...(resolved.userId ? { site_user_id: resolved.userId } : {}),
   });
 
   const { error: metaError } = await supabase
     .from("site_meta")
     .delete()
     .eq("site_id", safeSiteId)
-    .eq("email", cleanEmail);
+    .eq("email", resolved.email);
   if (metaError) throw new CliError(metaError.message);
 
-  return { removed: true, siteId: safeSiteId, userId: safeUserId, email: cleanEmail };
+  return { removed: true, siteId: safeSiteId, ...(resolved.userId ? { userId: resolved.userId } : {}), email: resolved.email };
 }
 
 export async function makeAdmin(
   supabase: SupabaseClient,
   siteId: string,
-  userId: string,
+  user: string,
 ): Promise<unknown> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  const safeUserId = assertSafeId(userId, "userId");
+  const resolved = await resolveSiteUser(supabase, safeSiteId, user);
+  if (!resolved.userId) {
+    throw new CliError("Could not resolve user ID for admin change.");
+  }
   return invokeFunction(supabase, "manage-user", {
     site_id: safeSiteId,
     action: "swap-admin",
-    site_user_id: safeUserId,
+    site_user_id: resolved.userId,
   });
 }
