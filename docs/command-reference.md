@@ -475,6 +475,8 @@ List redirect rules.
 static-studio redirects list <siteId> [--pull-zone-id <id>]
 ```
 
+Use DB-backed redirect IDs from the `dbRedirects` response for update, enable, disable, and DB delete operations.
+
 ### `redirects create`
 
 Create a 301 redirect.
@@ -485,15 +487,53 @@ static-studio redirects create <siteId> <fromPath> <toPath> [--pull-zone-id <id>
 
 By default, the pull zone and domain are resolved from the site.
 
-### `redirects delete`
+### `redirects update`
 
-Disable a redirect edge rule.
+Update a DB-backed redirect. `redirects edit` is an alias.
 
 ```bash
-static-studio redirects delete <siteId> <ruleId> [--pull-zone-id <id>]
+static-studio redirects update <siteId> <redirectId> [--from-path <path>] [--to-path <path>] [--active|--inactive]
 ```
 
-After disabling the rule, the CLI refreshes edge rules for the site.
+At least one field is required. Default redirects can only be enabled or disabled.
+
+### `redirects enable`
+
+Enable a DB-backed redirect.
+
+```bash
+static-studio redirects enable <siteId> <redirectId>
+```
+
+### `redirects disable`
+
+Disable a DB-backed redirect.
+
+```bash
+static-studio redirects disable <siteId> <redirectId>
+```
+
+### `redirects delete`
+
+Delete a DB-backed redirect, or disable a legacy CDN edge rule.
+
+```bash
+static-studio redirects delete <siteId> <redirectId> [--db] [--edge-rule] [--pull-zone-id <id>]
+```
+
+By default, the CLI treats the ID as a DB redirect ID and falls back to a legacy edge rule when the DB redirect is not found. Use `--edge-rule` to force the legacy CDN path.
+
+After deleting or disabling the rule, the CLI refreshes edge rules for the site.
+
+### `redirects refresh`
+
+Refresh redirect edge rules from stored redirects.
+
+```bash
+static-studio redirects refresh <siteId> [--skip-import-existing]
+```
+
+By default, existing Studio-owned CDN redirects are imported before the refresh so older redirects can be managed through DB-backed commands. Use `--skip-import-existing` after out-of-band cleanup when you do not want CDN rules imported.
 
 ### `redirects bulk-create`
 

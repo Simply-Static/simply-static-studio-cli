@@ -129,7 +129,21 @@ List and remove redirect rules:
 
 ```bash
 static-studio redirects list <siteId>
-static-studio redirects delete <siteId> <ruleId>
+static-studio redirects delete <siteId> <redirectId>
+```
+
+Edit and toggle DB-backed redirects:
+
+```bash
+static-studio redirects update <siteId> <redirectId> --from-path /old-page --to-path /new-page
+static-studio redirects disable <siteId> <redirectId>
+static-studio redirects enable <siteId> <redirectId>
+```
+
+Import older Studio-owned CDN redirect rules so they can be managed by ID:
+
+```bash
+static-studio redirects refresh <siteId>
 ```
 
 ## Users and Team Members

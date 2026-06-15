@@ -88,6 +88,17 @@ Rules:
 
 By default, the CLI resolves `pullZoneId` and redirect domain from the site. Use `--pull-zone-id` or `--domain` to override them.
 
+## Redirect Updates
+
+`redirects update` accepts `--from-path`, `--to-path`, `--active`, and `--inactive`.
+
+Rules:
+
+- At least one update field must be provided.
+- `--active` and `--inactive` are mutually exclusive.
+- `--from-path` and `--to-path` are trimmed, cannot be empty, and must be 2048 characters or fewer.
+- Default redirects can only be enabled or disabled.
+
 ## Team Email Files
 
 `team invite --file <path>` and `team bulk-invite <file>` accept files up to 64 KiB.

@@ -19,7 +19,15 @@ import { printValue } from "./output.js";
 import { getSiteStatistics, listPerformanceReports, runPerformanceTest } from "./performance.js";
 import { confirm } from "./prompt.js";
 import { deleteSshKey, getSshInfo, listBackups, queueBackup, queueSshKey } from "./queues.js";
-import { bulkCreateRedirects, createRedirect, deleteRedirect, listRedirects } from "./redirects.js";
+import {
+  bulkCreateRedirects,
+  createRedirect,
+  deleteRedirect,
+  listRedirects,
+  refreshRedirectRules,
+  setRedirectActive,
+  updateRedirect,
+} from "./redirects.js";
 import {
   clearCache,
   createSite,
@@ -85,6 +93,19 @@ function debugLogOptions(opts: ParsedOptions) {
     ...(opts.newestFirst ? { newestFirst: true } : {}),
     ...(opts.allowInsecureHttp ? { allowInsecureHttp: true } : {}),
     ...(opts.allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
+  };
+}
+
+function redirectUpdateOptions(opts: ParsedOptions): { fromPath?: string; toPath?: string; isActive?: boolean } {
+  if (opts.active && opts.inactive) {
+    throw new CliError("Use only one of --active or --inactive.");
+  }
+
+  return {
+    ...(opts.fromPath !== undefined ? { fromPath: opts.fromPath } : {}),
+    ...(opts.toPath !== undefined ? { toPath: opts.toPath } : {}),
+    ...(opts.active ? { isActive: true } : {}),
+    ...(opts.inactive ? { isActive: false } : {}),
   };
 }
 
@@ -725,12 +746,61 @@ redirects
   });
 
 redirects
-  .command("delete <siteId> <ruleId>")
-  .description("disable a redirect edge rule")
-  .option("--pull-zone-id <id>", "override pull zone ID")
-  .action(async (siteId: string, ruleId: string, opts: ParsedOptions, cmd: Command) => {
+  .command("update <siteId> <redirectId>")
+  .alias("edit")
+  .description("update a DB-backed redirect")
+  .option("--from-path <path>", "new source path")
+  .option("--to-path <path>", "new target path")
+  .option("--active", "enable the redirect")
+  .option("--inactive", "disable the redirect")
+  .action(async (siteId: string, redirectId: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await deleteRedirect(supabase, siteId, ruleId, opts.pullZoneId));
+      print(cmd, await updateRedirect(supabase, siteId, redirectId, redirectUpdateOptions(opts)));
+    });
+  });
+
+redirects
+  .command("enable <siteId> <redirectId>")
+  .description("enable a DB-backed redirect")
+  .action(async (siteId: string, redirectId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await setRedirectActive(supabase, siteId, redirectId, true));
+    });
+  });
+
+redirects
+  .command("disable <siteId> <redirectId>")
+  .description("disable a DB-backed redirect")
+  .action(async (siteId: string, redirectId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await setRedirectActive(supabase, siteId, redirectId, false));
+    });
+  });
+
+redirects
+  .command("delete <siteId> <redirectId>")
+  .description("delete a DB-backed redirect or disable a legacy edge rule")
+  .option("--pull-zone-id <id>", "override pull zone ID")
+  .option("--db", "treat redirectId as a DB redirect ID")
+  .option("--edge-rule", "treat redirectId as a legacy CDN edge rule ID")
+  .action(async (siteId: string, redirectId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await deleteRedirect(supabase, siteId, redirectId, opts));
+    });
+  });
+
+redirects
+  .command("refresh <siteId>")
+  .description("refresh redirect edge rules from stored redirects")
+  .option("--skip-import-existing", "do not import existing Studio-owned CDN redirects before refresh")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(
+        cmd,
+        await refreshRedirectRules(supabase, siteId, {
+          importExistingRedirects: !opts.skipImportExisting,
+        }),
+      );
     });
   });
 
