@@ -5,7 +5,7 @@ Command-line interface for Static Studio hosting workflows. The package is inten
 ## Install
 
 ```bash
-npm install -g @simply-static/studio-cli
+npm install -g @simply-static/static-studio
 static-studio --help
 ```
 

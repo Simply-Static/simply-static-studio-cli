@@ -23,7 +23,7 @@ Examples in these docs use `static-studio`, but `sss` accepts the same commands 
 ## Quick Start
 
 ```bash
-npm install -g @simply-static/studio-cli
+npm install -g @simply-static/static-studio
 static-studio login --email person@example.com
 static-studio sites list
 ```
