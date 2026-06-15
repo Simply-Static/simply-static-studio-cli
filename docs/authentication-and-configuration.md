@@ -9,7 +9,7 @@
 Install the published package globally:
 
 ```bash
-npm install -g @simply-static/studio-cli
+npm install -g @simply-static/static-studio
 static-studio --help
 ```
 
