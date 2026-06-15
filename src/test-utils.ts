@@ -6,6 +6,9 @@ type TableResult = {
 
 type TableResolver = (table: string) => TableResult;
 type TableInput = Record<string, TableResult> | TableResolver;
+type FunctionResolver = (name: string, body: unknown) => unknown | Promise<unknown>;
+type FunctionResult = Record<string, unknown> | unknown[] | string | number | boolean | null | undefined;
+type FunctionInput = FunctionResult | FunctionResolver;
 
 export interface QueryCall {
   table: string;
@@ -100,7 +103,7 @@ class QueryMock implements PromiseLike<TableResult> {
 
 export function createSupabaseMock(
   tables: TableInput,
-  functionResult: unknown = { ok: true },
+  functionResult: FunctionInput = { ok: true },
 ): {
   supabase: any;
   calls: QueryCall[];
@@ -122,8 +125,13 @@ export function createSupabaseMock(
       },
       functions: {
         async invoke(name: string, options: { body?: unknown } = {}) {
-          functionCalls.push({ name, body: options.body ?? {} });
-          return { data: functionResult, error: null };
+          const body = options.body ?? {};
+          functionCalls.push({ name, body });
+          const data =
+            typeof functionResult === "function"
+              ? await functionResult(name, body)
+              : functionResult;
+          return { data, error: null };
         },
       },
     },

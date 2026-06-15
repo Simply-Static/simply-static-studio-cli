@@ -67,6 +67,9 @@ static-studio backups create <siteId>
 static-studio backups restore <siteId> --backup-id <backupId>
 
 static-studio redirects create <siteId> /old /new
+static-studio redirects update <siteId> <redirectId> --from-path /old --to-path /new
+static-studio redirects disable <siteId> <redirectId>
+static-studio redirects enable <siteId> <redirectId>
 static-studio redirects bulk-create <siteId> redirects.json
 
 static-studio users list <siteId>
