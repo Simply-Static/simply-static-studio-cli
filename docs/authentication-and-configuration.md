@@ -45,12 +45,15 @@ static-studio login --email person@example.com
 static-studio login --email person@example.com --otp 123456
 ```
 
-Token login:
+Personal Access Token login:
 
 ```bash
 static-studio login --token "$STATIC_STUDIO_ACCESS_TOKEN"
-static-studio login --token "$STATIC_STUDIO_ACCESS_TOKEN" --refresh-token "$STATIC_STUDIO_REFRESH_TOKEN"
 ```
+
+Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. They require an active paid subscription; free trial accounts can open the CLI token screen, but the token field and regeneration action remain locked until the account subscribes.
+
+The CLI exchanges a Personal Access Token through the platform `access-token` Edge Function for a short-lived Supabase access token. Personal Access Tokens do not have refresh tokens, and the exchange response intentionally does not include one.
 
 Options:
 
@@ -58,8 +61,8 @@ Options:
 | --- | --- |
 | `--email <email>` | Email address for OTP login. |
 | `--otp <code>` | OTP code for non-interactive email login. |
-| `--token <token>` | Access token to store instead of starting OTP login. |
-| `--refresh-token <token>` | Refresh token paired with `--token`. |
+| `--token <token>` | Personal Access Token to store instead of starting OTP login. Supabase session access tokens are also supported when paired with `--refresh-token`. |
+| `--refresh-token <token>` | Refresh token paired with a Supabase session access token. Do not use this with a Personal Access Token. |
 | `--create-user` | Allow Supabase Auth to create a user during OTP login. |
 
 The command prints the authenticated user summary and config path.
@@ -87,13 +90,13 @@ static-studio --profile agency logout
 
 | Variable | Description |
 | --- | --- |
-| `STATIC_STUDIO_ACCESS_TOKEN` | Access token used directly for the current command. When set, the CLI does not require a saved profile. |
-| `STATIC_STUDIO_REFRESH_TOKEN` | Optional refresh token paired with `STATIC_STUDIO_ACCESS_TOKEN` in the generated auth context. |
+| `STATIC_STUDIO_ACCESS_TOKEN` | Personal Access Token used directly for the current command. Supabase session access tokens are also supported. When set, the CLI does not require a saved profile. |
+| `STATIC_STUDIO_REFRESH_TOKEN` | Refresh token paired with a Supabase session access token. Do not use this with a Personal Access Token. |
 | `STATIC_STUDIO_CONFIG_DIR` | Directory that contains `config.json`; defaults to `~/.static-studio`. |
 | `STATIC_STUDIO_SUPABASE_URL` | Override the Supabase URL in local config. |
 | `STATIC_STUDIO_SUPABASE_ANON_KEY` | Override the Supabase anon key in local config. |
 
-Environment access tokens take precedence over saved profile tokens.
+Environment tokens take precedence over saved profile tokens.
 
 ## Auth Checks
 

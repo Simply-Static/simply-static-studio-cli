@@ -25,11 +25,13 @@ Interactive email OTP login:
 static-studio login --email person@example.com
 ```
 
-Token login for CI or agents:
+Personal Access Token login for CI or agents:
 
 ```bash
 static-studio login --token "$STATIC_STUDIO_ACCESS_TOKEN"
 ```
+
+Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. They require an active paid subscription; trial accounts can see the CLI option in the app, but cannot issue or exchange tokens.
 
 You can also skip local config entirely:
 

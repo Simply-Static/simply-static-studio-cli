@@ -1,7 +1,12 @@
 import type { Session } from "@supabase/supabase-js";
 import { CliError } from "./errors.js";
 import { getProfile, getSupabaseConfig, removeProfile, setProfile } from "./config.js";
-import { createStaticStudioClient } from "./supabase.js";
+import {
+  createStaticStudioClient,
+  isPersonalAccessToken,
+  resolveAccessTokenAuth,
+  resolveSessionTokenAuth,
+} from "./supabase.js";
 import { prompt } from "./prompt.js";
 import type { StoredProfile } from "./types.js";
 
@@ -18,19 +23,29 @@ export async function loginWithToken(options: {
   profile?: string;
 }): Promise<StoredProfile> {
   const { config, profileName } = await getProfile(options.profile);
-  const supabase = createStaticStudioClient({
-    ...getSupabaseConfig(config),
-    accessToken: options.token,
-  });
-  const { data, error } = await supabase.auth.getUser(options.token);
-  if (error || !data.user) {
-    throw new CliError(`Token validation failed: ${error?.message || "unknown error"}`);
+  const supabaseConfig = getSupabaseConfig(config);
+  if (options.refreshToken && isPersonalAccessToken(options.token)) {
+    throw new CliError("Do not use --refresh-token with a Personal Access Token.");
   }
+
+  if (options.refreshToken) {
+    const { session } = await resolveSessionTokenAuth(supabaseConfig, options.token, options.refreshToken);
+    const profile: StoredProfile = {
+      accessToken: session.access_token,
+      refreshToken: session.refresh_token,
+      ...(session.expires_at ? { expiresAt: session.expires_at } : {}),
+      ...(session.token_type ? { tokenType: session.token_type } : {}),
+      user: userSummary(session.user),
+    };
+    await setProfile(profile, profileName);
+    return profile;
+  }
+
+  const { user } = await resolveAccessTokenAuth(supabaseConfig, options.token);
 
   const profile: StoredProfile = {
     accessToken: options.token,
-    ...(options.refreshToken ? { refreshToken: options.refreshToken } : {}),
-    user: userSummary(data.user),
+    user: userSummary(user),
   };
   await setProfile(profile, profileName);
   return profile;

@@ -17,6 +17,8 @@ CI or agent usage:
 STATIC_STUDIO_ACCESS_TOKEN=... static-studio --json sites list
 ```
 
+Generate the token in Static Studio under **Account -> Access Token**. Personal Access Tokens are available for paid subscriptions and are passed without a refresh token.
+
 Multiple accounts:
 
 ```bash

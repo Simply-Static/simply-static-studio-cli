@@ -28,10 +28,12 @@ static-studio login --email person@example.com
 static-studio sites list
 ```
 
-For non-interactive environments, provide an access token:
+For non-interactive environments, provide a Personal Access Token:
 
 ```bash
 STATIC_STUDIO_ACCESS_TOKEN=... static-studio --json sites list
 ```
+
+Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token** and require an active paid subscription.
 
 Use `--json` whenever another program or agent will parse the output.
