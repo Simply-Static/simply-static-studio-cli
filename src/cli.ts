@@ -130,11 +130,11 @@ async function collectTeamEmails(emails: string[] | undefined, file: string | un
 
 program
   .command("login")
-  .description("sign in with an email OTP or a platform access token")
+  .description("sign in with an email OTP, Personal Access Token, or Supabase session token pair")
   .option("--email <email>", "email address for OTP login")
   .option("--otp <code>", "email OTP code; useful for non-interactive usage")
-  .option("--token <token>", "access token to store instead of starting OTP login")
-  .option("--refresh-token <token>", "refresh token paired with --token")
+  .option("--token <token>", "Personal Access Token, or Supabase session access token when paired with --refresh-token")
+  .option("--refresh-token <token>", "refresh token paired with a Supabase session access token")
   .option("--create-user", "allow Supabase Auth to create a user during OTP login")
   .action(async (localOpts: ParsedOptions, cmd: Command) => {
     const opts = { ...globals(cmd), ...localOpts } as CommandGlobals & {

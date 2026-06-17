@@ -6,13 +6,13 @@ All commands support the global `--json` and `--profile <name>` options. The `ss
 
 ### `login`
 
-Sign in with email OTP or store a platform access token.
+Sign in with email OTP, store a Personal Access Token, or store a Supabase session token pair.
 
 ```bash
 static-studio login [--email <email>] [--otp <code>] [--token <token>] [--refresh-token <token>] [--create-user]
 ```
 
-If `--token` is present, token login is used. Otherwise the CLI starts email OTP login.
+If `--token` is present, token login is used. Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token**, require an active paid subscription, and should be passed without `--refresh-token`. `--refresh-token` is only for Supabase session access tokens. Otherwise the CLI starts email OTP login.
 
 ### `logout`
 
