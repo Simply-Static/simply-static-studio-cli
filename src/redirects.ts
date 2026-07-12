@@ -91,12 +91,33 @@ export async function refreshRedirectRules(
   options: RefreshRedirectRulesOptions = {},
 ): Promise<unknown> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  return invokeFunction(supabase, "refresh-edge-rules", {
+  const result = await invokeFunction<{
+    results?: Array<{
+      siteId?: string | number;
+      status?: string;
+      error?: string;
+      defaultRuleErrors?: unknown[];
+      redirectErrors?: unknown[];
+    }>;
+  }>(supabase, "refresh-edge-rules", {
     siteId: safeSiteId,
     ...(options.importExistingRedirects === undefined
       ? {}
       : { importExistingRedirects: options.importExistingRedirects }),
   });
+  const siteResult = result?.results?.find((item) => String(item.siteId) === safeSiteId);
+  if (!siteResult) {
+    throw new CliError(`Edge-rule refresh did not return a result for site ${safeSiteId}.`);
+  }
+  if (siteResult.status !== "success") {
+    const details = [
+      siteResult.error,
+      ...(siteResult.defaultRuleErrors || []),
+      ...(siteResult.redirectErrors || []),
+    ].filter(Boolean).map(String).join("; ");
+    throw new CliError(`Edge-rule refresh ${siteResult.status || "failed"}${details ? `: ${details}` : "."}`);
+  }
+  return result;
 }
 
 export async function listRedirects(
@@ -185,6 +206,10 @@ async function deleteLegacyEdgeRule(
     ruleId,
     siteId: safeSiteId,
   });
+  if ((result as { success?: boolean; warning?: unknown })?.success === false) {
+    const warning = (result as { warning?: { error?: string; details?: string } }).warning;
+    throw new CliError(warning?.details || warning?.error || "The legacy edge rule could not be disabled.");
+  }
   await refreshRedirectRules(supabase, safeSiteId, { importExistingRedirects: true });
   return result;
 }

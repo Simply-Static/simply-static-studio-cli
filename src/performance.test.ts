@@ -36,6 +36,20 @@ describe("runPerformanceTest", () => {
 
     await expect(runPerformanceTest(supabase, "site-1")).rejects.toThrow(CliError);
   });
+
+  it("rejects custom URLs because Lagos always tests the stored site URL", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({
+      site: {
+        data: { id: "site-1", url: "https://example.test" },
+        error: null,
+      },
+    });
+
+    await expect(
+      runPerformanceTest(supabase, "site-1", { url: "https://other.example.test" }),
+    ).rejects.toThrow("Custom performance URLs are no longer supported");
+    expect(functionCalls).toEqual([]);
+  });
 });
 
 describe("getSiteStatistics", () => {

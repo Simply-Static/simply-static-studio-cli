@@ -51,13 +51,19 @@ export async function runPerformanceTest(
 ): Promise<unknown> {
   const safeSiteId = assertSafeId(siteId, "siteId");
   const site = await getSite(supabase, safeSiteId);
-  const rawUrl = options.url || String(site.url || "");
+  const rawUrl = String(site.url || "");
   if (!rawUrl) {
     throw new CliError("Site does not have a URL.");
   }
+  const canonicalUrl = assertPublicHttpUrl(rawUrl, "Site URL");
+  if (options.url && assertPublicHttpUrl(options.url, "Test URL") !== canonicalUrl) {
+    throw new CliError(
+      "Custom performance URLs are no longer supported; Studio tests the site's stored URL.",
+    );
+  }
 
   return invokeFunction(supabase, "pagespeed", {
-    url: assertPublicHttpUrl(rawUrl, "Site URL"),
+    url: canonicalUrl,
     site_id: safeSiteId,
     ...(options.force ? { force: true } : {}),
   });

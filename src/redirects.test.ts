@@ -11,6 +11,10 @@ import {
 } from "./redirects.js";
 import { createSupabaseMock } from "./test-utils.js";
 
+const refreshSuccess = {
+  results: [{ siteId: "site-1", status: "success" }],
+};
+
 describe("bulkCreateRedirects", () => {
   it("validates redirect files before invoking the backend", async () => {
     const filePath = join(tmpdir(), `redirects-${Date.now()}.json`);
@@ -31,7 +35,7 @@ describe("bulkCreateRedirects", () => {
 
 describe("updateRedirect", () => {
   it("updates DB-backed redirects and refreshes edge rules without importing stale CDN rules", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({});
+    const { supabase, functionCalls } = createSupabaseMock({}, refreshSuccess);
 
     await updateRedirect(supabase, "site-1", "10", {
       fromPath: " /old ",
@@ -59,7 +63,7 @@ describe("updateRedirect", () => {
   });
 
   it("requires at least one field to update", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({});
+    const { supabase, functionCalls } = createSupabaseMock({}, refreshSuccess);
 
     await expect(updateRedirect(supabase, "site-1", "10", {})).rejects.toThrow(
       "at least one redirect field",
@@ -70,7 +74,7 @@ describe("updateRedirect", () => {
 
 describe("setRedirectActive", () => {
   it("updates the persisted redirect status", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({});
+    const { supabase, functionCalls } = createSupabaseMock({}, refreshSuccess);
 
     await setRedirectActive(supabase, "site-1", "10", false);
 
@@ -87,7 +91,7 @@ describe("setRedirectActive", () => {
 
 describe("deleteRedirect", () => {
   it("deletes DB-backed redirects and refreshes edge rules without importing stale CDN rules", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({});
+    const { supabase, functionCalls } = createSupabaseMock({}, refreshSuccess);
 
     await deleteRedirect(supabase, "site-1", "10", { db: true });
 
@@ -120,7 +124,9 @@ describe("deleteRedirect", () => {
       (name) =>
         name === "delete-redirect"
           ? { error: "Redirect not found or cannot be deleted." }
-          : { ok: true },
+          : name === "refresh-edge-rules"
+            ? refreshSuccess
+            : { ok: true },
     );
 
     await expect(deleteRedirect(supabase, "site-1", "10")).rejects.toThrow(
@@ -149,7 +155,9 @@ describe("deleteRedirect", () => {
       (name) =>
         name === "delete-redirect"
           ? { error: "Redirect not found or cannot be deleted." }
-          : { ok: true },
+          : name === "refresh-edge-rules"
+            ? refreshSuccess
+            : { ok: true },
     );
 
     await deleteRedirect(supabase, "site-1", "rule-1");
@@ -186,7 +194,7 @@ describe("deleteRedirect", () => {
         data: { id: "site-1", url: "https://example.test", pull_zone_id: "pull-1" },
         error: null,
       },
-    });
+    }, refreshSuccess);
 
     await deleteRedirect(supabase, "site-1", "rule-1", { edgeRule: true });
 
@@ -212,7 +220,7 @@ describe("deleteRedirect", () => {
 
 describe("refreshRedirectRules", () => {
   it("passes through the importExistingRedirects option", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({});
+    const { supabase, functionCalls } = createSupabaseMock({}, refreshSuccess);
 
     await refreshRedirectRules(supabase, "site-1", { importExistingRedirects: true });
 
@@ -225,5 +233,48 @@ describe("refreshRedirectRules", () => {
         },
       },
     ]);
+  });
+
+  it("surfaces per-site Lagos refresh failures instead of reporting success", async () => {
+    const { supabase } = createSupabaseMock({}, {
+      results: [{
+        siteId: "site-1",
+        status: "partial",
+        error: "Could not update all rules",
+        defaultRuleErrors: ["Markdown rule failed"],
+      }],
+    });
+
+    await expect(
+      refreshRedirectRules(supabase, "site-1", { importExistingRedirects: true }),
+    ).rejects.toThrow("Could not update all rules; Markdown rule failed");
+  });
+
+  it("rejects a success-shaped response that omits the requested site", async () => {
+    const { supabase } = createSupabaseMock({}, { message: "No sites found to refresh." });
+
+    await expect(refreshRedirectRules(supabase, "site-1"))
+      .rejects.toThrow("did not return a result for site site-1");
+  });
+});
+
+describe("legacy edge-rule failure handling", () => {
+  it("does not refresh after disable-redirect reports a warning response", async () => {
+    const { supabase, functionCalls } = createSupabaseMock(
+      {
+        site: {
+          data: { id: "site-1", url: "https://example.test", pull_zone_id: "pull-1" },
+          error: null,
+        },
+      },
+      (name) => name === "disable-redirect"
+        ? { success: false, warning: { details: "Bunny kept the edge rule." } }
+        : { ok: true },
+    );
+
+    await expect(
+      deleteRedirect(supabase, "site-1", "rule-1", { edgeRule: true }),
+    ).rejects.toThrow("Bunny kept the edge rule.");
+    expect(functionCalls.map((call) => call.name)).toEqual(["disable-redirect"]);
   });
 });

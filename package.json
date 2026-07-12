@@ -1,6 +1,6 @@
 {
   "name": "@simply-static/static-studio",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Command-line interface for Static Studio hosting workflows.",
   "license": "MIT",
   "type": "module",
@@ -32,6 +32,7 @@
   "files": [
     "dist",
     "docs",
+    "CHANGELOG.md",
     "README.md"
   ],
   "publishConfig": {
@@ -49,8 +50,6 @@
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.637.0",
-    "@aws-sdk/lib-storage": "^3.637.0",
     "@supabase/supabase-js": "^2.46.2",
     "commander": "^12.1.0"
   },
