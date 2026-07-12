@@ -4,6 +4,7 @@ import {
   normalizeEmailList,
   normalizeEnvironmentTitle,
   normalizeHexColor,
+  normalizeMountPath,
   parsePositiveInteger,
   sanitizeSearchTerm,
 } from "./validation.js";
@@ -30,5 +31,17 @@ describe("validation helpers", () => {
     expect(() => normalizeEnvironmentTitle("production")).toThrow(CliError);
     expect(normalizeHexColor("#3858e9")).toBe("#3858E9");
     expect(() => normalizeHexColor("blue")).toThrow(CliError);
+  });
+
+  it("normalizes mount paths using the Lagos path rules", () => {
+    expect(normalizeMountPath(undefined)).toBe("");
+    expect(normalizeMountPath("/")).toBe("");
+    expect(normalizeMountPath(" blog//news/ ")).toBe("/blog/news");
+    expect(normalizeMountPath("https://example.com/resources/?preview=1#top")).toBe("/resources");
+  });
+
+  it("rejects unsafe mount paths", () => {
+    expect(() => normalizeMountPath("/blog/../admin")).toThrow(CliError);
+    expect(() => normalizeMountPath("/blog/<script>")).toThrow(CliError);
   });
 });

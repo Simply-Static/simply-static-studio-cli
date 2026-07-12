@@ -14,7 +14,7 @@ import {
 
 const MAX_TEAM_EMAILS = 100;
 const MAX_EMAIL_FILE_BYTES = 64 * 1024;
-const WORDPRESS_ROLES = ["administrator", "editor", "author", "contributor", "subscriber"] as const;
+const WORDPRESS_ROLES = ["administrator", "editor", "author", "contributor"] as const;
 
 export interface TeamMemberRecord {
   id: string | number;
@@ -248,6 +248,14 @@ export async function removeTeamMember(
     }
     const { error } = await supabase.from("user_site").delete().eq("user_id", safeMemberId).eq("site_id", site.site_id);
     if (error) throw new CliError(error.message);
+    if (memberEmail) {
+      const { error: metaError } = await supabase
+        .from("site_meta")
+        .delete()
+        .eq("site_id", site.site_id)
+        .eq("email", memberEmail);
+      if (metaError) throw new CliError(metaError.message);
+    }
     sitesProcessed += 1;
   }
 

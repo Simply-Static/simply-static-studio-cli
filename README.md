@@ -2,6 +2,8 @@
 
 Command-line interface for Static Studio hosting workflows. The package is intended for humans and coding agents such as Codex or Claude Code that need a narrow, scriptable interface to the Static Studio platform.
 
+This documentation covers release `0.1.5`.
+
 ## Install
 
 ```bash
@@ -31,7 +33,7 @@ Personal Access Token login for CI or agents:
 static-studio login --token "$STATIC_STUDIO_ACCESS_TOKEN"
 ```
 
-Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. They require an active paid subscription; trial accounts can see the CLI option in the app, but cannot issue or exchange tokens.
+Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. Token issuance and exchange require an active subscription with quota greater than zero. Trial status alone does not categorically exclude an account; the subscription and quota checks are authoritative.
 
 You can also skip local config entirely:
 
@@ -52,17 +54,54 @@ static-studio sites get <siteId>
 static-studio sites basic-auth <siteId>
 static-studio sites magic-login <siteId>
 static-studio sites debug-log <siteId> --tail 200
-static-studio sites create --name Demo --subdomain demo123
+static-studio sites create --name Demo --subdomain demo123 --mount-path /blog
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
 static-studio sites push <siteId> full
 static-studio sites push <siteId> changes
 static-studio sites redeploy <siteId> --migration-file ./site-studio-backup.zip
+static-studio sites cancel-export <siteId> --yes
+static-studio sites migration-log <siteId>
+static-studio sites releases <siteId>
+static-studio sites rollback-status <siteId>
+static-studio sites rollback-snapshots <siteId>
+static-studio sites rollback <siteId> <snapshotId> --yes
 static-studio sites delete <siteId> --yes
 
 static-studio domains list <siteId>
 static-studio domains add <siteId> example.com
 static-studio domains primary <siteId> example.com
+static-studio domains mount <siteId> example.com /docs
+static-studio domains issue-ssl <siteId> example.com
+static-studio domains transfer <sourceSiteId> <targetSiteId> example.com --yes
 static-studio domains remove <siteId> example.com
+
+static-studio health overview <siteId>
+static-studio health run <siteId> --checks uptime ssl sitemap
+
+static-studio alerts status <siteId>
+static-studio alerts save <siteId> --enabled on --recipients alerts@example.com
+static-studio alerts test <siteId> alerts@example.com
+
+static-studio seo list <siteId>
+static-studio seo save <siteId> robots.txt --file ./robots.txt
+static-studio seo check-sitemaps <siteId>
+
+static-studio indexnow status <siteId>
+static-studio indexnow enable <siteId>
+static-studio indexnow auto-submit <siteId> on
+static-studio indexnow submit <siteId>
+
+static-studio reports list <siteId>
+static-studio reports get <reportId>
+static-studio reports generate-pdf <reportId>
+static-studio reports pdf-url <reportId>
+static-studio reports shares <reportId>
+static-studio reports share <reportId> --recipient client@example.com --password-env REPORT_SHARE_PASSWORD
+static-studio reports revoke-share <reportId> <shareId> --yes
+static-studio reports schedules <siteId>
+static-studio reports schedule monthly <siteId> --name "Monthly report"
+static-studio reports disable-schedule <scheduleId>
+static-studio reports delete-schedule <scheduleId> --yes
 
 static-studio backups list <siteId> --refresh
 static-studio backups create <siteId>
@@ -97,6 +136,10 @@ static-studio environments enable <siteId>
 static-studio environments create <siteId> staging
 static-studio environments delete <siteId> staging --yes
 static-studio environments disable <siteId> --yes
+static-studio environments domain-list <siteId> staging
+static-studio environments domain-connect <siteId> staging staging.example.com
+static-studio environments domain-ssl <siteId> staging staging.example.com
+static-studio environments domain-remove <siteId> staging --yes
 
 static-studio tags list
 static-studio tags create Client --color '#3858E9'
@@ -105,6 +148,14 @@ static-studio tags remove <siteId> <tagId>
 
 static-studio ssh add <siteId> --key-file ~/.ssh/id_ed25519.pub
 ```
+
+New sites use managed Studio URLs and server-generated WordPress, Basic Auth, and secret credentials. Migration archives are uploaded with presigned multipart requests in 25 MiB parts, up to the 10 GB limit.
+
+The `--url` option on `performance run` and `performance get` is deprecated. If supplied for compatibility, it must resolve to the site's stored URL.
+
+WordPress role options support `administrator`, `editor`, `author`, and `contributor`; `subscriber` is not supported.
+
+Reports and configurable Site Health alerts require the corresponding Agency entitlements. Lagos enforces these entitlements and site access for every operation.
 
 ## Documentation
 
@@ -134,8 +185,13 @@ This package is scoped and intended to be public on npm. Before publishing, make
 
 ```bash
 npm login
-npm version patch
+npm ci
+npm run typecheck
+npm test
+npm run build
+npm audit --audit-level=high
+npm pack --dry-run
 npm publish --access public
 ```
 
-Use `npm pack --dry-run` to inspect exactly which files will be published.
+The package version and changelog must already be updated before this checklist. Use `npm version patch` when starting the next release, not after a version has been prepared.

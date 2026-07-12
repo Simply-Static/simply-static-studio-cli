@@ -2,10 +2,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { DEFAULT_TLD, SUPABASE_API_VERSION } from "./constants.js";
 import { CliError } from "./errors.js";
 import { invokeFunction } from "./supabase.js";
-import { md5, randomAlphanumeric, randomAlpha, randomDomainWord, randomPassword, randomUsername } from "./random.js";
+import { randomAlpha, randomAlphanumeric, randomDomainWord } from "./random.js";
 import type { SiteMetaRecord, SiteRecord } from "./types.js";
 import {
   assertSafeId,
+  normalizeMountPath,
   parsePositiveInteger,
   requireAllowedValue,
   sanitizeSearchTerm,
@@ -16,13 +17,61 @@ export interface CreateSiteOptions {
   subdomain?: string;
   tld?: string;
   url?: string;
+  /** @deprecated Studio derives the admin URL on the server. */
   adminUrl?: string;
   email: string;
   userId: string;
   bedrock?: boolean;
   hasMigration?: boolean;
   phpVersion?: string;
+  /** @deprecated Studio derives account ownership from the authenticated user. */
   ownerAccountId?: string | null;
+  mountPath?: string;
+}
+
+const MANAGED_SITE_HOST_RE = /(?:\.onstatic\.studio|\.static\d*\.studio)$/;
+const MANAGED_SUBDOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"] as const;
+
+export function normalizeManagedSiteUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(String(value || "").trim());
+  } catch {
+    throw new CliError("Site URL must be a valid managed Studio HTTPS URL.");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search ||
+    url.hash ||
+    !MANAGED_SITE_HOST_RE.test(hostname)
+  ) {
+    throw new CliError("New sites must use an HTTPS managed Studio hostname without a path, query, or credentials.");
+  }
+  return `https://${hostname}`;
+}
+
+function normalizeManagedSubdomain(value: string): string {
+  const subdomain = String(value || "").trim().toLowerCase();
+  if (!MANAGED_SUBDOMAIN_RE.test(subdomain)) {
+    throw new CliError(
+      "Site subdomain must be 1-63 lowercase letters, numbers, or hyphens and cannot start or end with a hyphen.",
+    );
+  }
+  return subdomain;
+}
+
+function normalizeSiteName(value: string | undefined): string {
+  const name = String(value || randomDomainWord()).trim();
+  if (!name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new CliError("Site name must be between 1 and 200 printable characters.");
+  }
+  return name;
 }
 
 export function generateSiteSeed(options: Partial<CreateSiteOptions> = {}): {
@@ -32,12 +81,24 @@ export function generateSiteSeed(options: Partial<CreateSiteOptions> = {}): {
   url: string;
   adminUrl: string;
 } {
-  const tld = options.tld || DEFAULT_TLD;
-  const subdomain = options.subdomain || `${randomAlpha(2)}${randomAlphanumeric(13)}`;
-  const url = options.url || `https://${subdomain}.${tld}`;
-  const adminUrl = options.adminUrl || `https://wp-${subdomain}.${tld}/wp-admin`;
+  const requestedUrl = options.url ? normalizeManagedSiteUrl(options.url) : undefined;
+  const requestedHost = requestedUrl ? new URL(requestedUrl).hostname : "";
+  const urlSubdomain = requestedHost.split(".")[0] || "";
+  const subdomain = normalizeManagedSubdomain(
+    options.subdomain || urlSubdomain || `${randomAlpha(2)}${randomAlphanumeric(13)}`,
+  );
+  if (urlSubdomain && subdomain !== urlSubdomain) {
+    throw new CliError("Site subdomain must match the hostname supplied with --url.");
+  }
+  const tld = requestedHost
+    ? requestedHost.split(".").slice(1).join(".")
+    : String(options.tld || DEFAULT_TLD).trim().toLowerCase();
+  const url = requestedUrl || normalizeManagedSiteUrl(`https://${subdomain}.${tld}`);
+  const hostname = new URL(url).hostname;
+  const wpHostname = hostname.endsWith(".onstatic.studio") ? `wp-${hostname}` : `wp.${hostname}`;
+  const adminUrl = `https://${wpHostname}/wp-admin`;
   return {
-    name: options.name || randomDomainWord(),
+    name: normalizeSiteName(options.name),
     subdomain,
     tld,
     url,
@@ -70,22 +131,37 @@ export async function listSites(
   ] as const, "sort");
   const orderAsc = options.ascending ?? false;
 
+  const { data: subscription } = await supabase
+    .from("subscription")
+    .select("partner_id")
+    .eq("user_id", user.id)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   let query = supabase
     .from("site")
     .select(
-      "*, user_site!inner(user_id, admin, owner_account_id),site_meta!inner(email, admin_url, secret_key, pagespeed_desktop, pagespeed_mobile, ttfb)",
+      "*, user_site!inner(user_id, admin, owner_account_id),site_meta(email, admin_url, secret_key, pagespeed_desktop, pagespeed_mobile, ttfb)",
       { count: "exact" },
     )
     .eq("user_site.user_id", user.id)
     .order(orderField, { ascending: orderAsc });
 
+  // Keep the embed left-joined so team-only rows are still visible, while
+  // preventing one member from receiving another member's site metadata.
   if (user.email) {
     query = query.eq("site_meta.email", user.email);
   }
 
+  if ((subscription as { partner_id?: string } | null)?.partner_id === "hardypress") {
+    query = query.eq("hp_webhook_pending", false);
+  }
+
   const search = sanitizeSearchTerm(options.search);
   if (search) {
-    query = query.or(`name.ilike.%${search}%,url.ilike.%${search}%`);
+    const escaped = search.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    query = query.or(`name.ilike."%${escaped}%",url.ilike."%${escaped}%"`);
   }
 
   const { data, error, count } = await query.range(from, to);
@@ -177,7 +253,9 @@ export async function getMagicLoginLink(
     getSite(supabase, safeSiteId),
     getSiteMeta(supabase, safeSiteId, email),
   ]);
-  const staticSiteId = site.static_site_record_id ? String(site.static_site_record_id) : "";
+  const staticSiteId = site.static_site_record_id
+    ? String(site.static_site_record_id)
+    : "";
   if (!staticSiteId) {
     throw new CliError(`Site ${safeSiteId} is missing static_site_record_id.`);
   }
@@ -208,59 +286,51 @@ export async function createSite(
   options: CreateSiteOptions,
 ): Promise<{ site: SiteRecord; queue: unknown; credentials: Record<string, string> }> {
   const seed = generateSiteSeed(options);
-  const password = randomPassword();
-  const username = randomUsername();
-  const basicAuthUser = randomUsername();
-  const basicAuthPassword = randomPassword();
-  const secretKey = md5(seed.url);
-  const adminUrl = options.bedrock
-    ? seed.adminUrl.replace(/\/wp-admin\/?$/, "/wp/wp-admin")
-    : seed.adminUrl;
+  const mountPath = normalizeMountPath(options.mountPath);
+  const phpVersion = requireAllowedValue(
+    String(options.phpVersion || "8.3"),
+    PHP_VERSIONS,
+    "PHP version",
+  );
 
   const recordResult = await invokeFunction<{ site: SiteRecord }>(supabase, "create-site-record", {
     url: seed.url,
     name: seed.name,
-    initial_export_done: false,
     ...(options.bedrock ? { bedrock: true } : {}),
-    password,
-    username,
-    basic_auth_user: basicAuthUser,
-    basic_auth_password: basicAuthPassword,
-    admin_url: adminUrl,
-    secret_key: secretKey,
     email: options.email,
     user_id: options.userId,
-    owner_account_id: options.ownerAccountId || null,
+    mount_path: mountPath,
   });
 
   const siteId = String(recordResult.site.id);
   const queue = await invokeFunction(supabase, "queue-site", {
-    subdomain: seed.subdomain,
-    tld: seed.tld,
-    username,
-    password,
-    email: options.email,
-    basic_auth_user: basicAuthUser,
-    basic_auth_password: basicAuthPassword,
-    secret_key: secretKey,
     siteHasMigration: Boolean(options.hasMigration),
     site_id: siteId,
     apiVersion: SUPABASE_API_VERSION,
-    phpVersion: options.phpVersion || "8.3",
+    phpVersion,
   });
+  const meta = await getSiteMeta(supabase, siteId, options.email);
 
   return {
     site: recordResult.site,
     queue,
     credentials: {
-      username,
-      password,
-      basic_auth_user: basicAuthUser,
-      basic_auth_password: basicAuthPassword,
-      admin_url: adminUrl,
-      secret_key: secretKey,
+      username: requiredCredential(meta.username, "username"),
+      password: requiredCredential(meta.password, "password"),
+      basic_auth_user: requiredCredential(meta.basic_auth_user, "basic_auth_user"),
+      basic_auth_password: requiredCredential(meta.basic_auth_password, "basic_auth_password"),
+      admin_url: requiredCredential(meta.admin_url, "admin_url"),
+      secret_key: requiredCredential(meta.secret_key, "secret_key"),
     },
   };
+}
+
+function requiredCredential(value: unknown, field: string): string {
+  const credential = String(value || "");
+  if (!credential) {
+    throw new CliError(`The site was created, but ${field} was missing from its server-generated credentials.`);
+  }
+  return credential;
 }
 
 export async function updateSite(
@@ -356,15 +426,24 @@ export async function getChangesCount(supabase: SupabaseClient, siteId: string):
 }
 
 export async function clearCache(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  return invokeFunction(supabase, "clear-cache", { siteId: assertSafeId(siteId, "siteId") });
+  const site = await getSite(supabase, assertSafeId(siteId, "siteId"));
+  if (!site.pull_zone_id) {
+    throw new CliError("Site does not have a pull_zone_id yet.");
+  }
+  return invokeFunction(supabase, "clear-cache", { pull_zone: site.pull_zone_id });
 }
 
 export function siteSummaryRows(sites: SiteRecord[]): Record<string, unknown>[] {
-  return sites.map((site) => ({
-    id: site.id,
-    name: site.name,
-    url: site.url,
-    status: site.status,
-    created_at: site.created_at,
-  }));
+  return sites.map((site) => {
+    const mountPath = normalizeMountPath(site.mount_path);
+    const baseUrl = String(site.url || "").replace(/\/+$/, "");
+    return {
+      id: site.id,
+      name: site.name,
+      url: baseUrl ? `${baseUrl}${mountPath}` : site.url,
+      ...(mountPath ? { base_url: site.url, mount_path: mountPath } : {}),
+      status: site.status,
+      created_at: site.created_at,
+    };
+  });
 }

@@ -4,7 +4,7 @@ import { invokeFunction } from "./supabase.js";
 import { randomUsername } from "./random.js";
 import { assertSafeId, normalizeEmail, requireAllowedValue } from "./validation.js";
 
-const WORDPRESS_ROLES = ["administrator", "editor", "author", "contributor", "subscriber"] as const;
+const WORDPRESS_ROLES = ["administrator", "editor", "author", "contributor"] as const;
 
 function normalizeRole(role: string): (typeof WORDPRESS_ROLES)[number] {
   return requireAllowedValue(role || "administrator", WORDPRESS_ROLES, "role");
@@ -26,7 +26,7 @@ export async function listUsers(supabase: SupabaseClient, siteId: string): Promi
       const result = await invokeFunction<{ items?: { id: string; email_confirmed?: boolean; has_paid_subscription?: boolean }[] }>(
         supabase,
         "get-user-confirmations",
-        { ids },
+        { ids, site_id: safeSiteId },
       );
       confirmations = Object.fromEntries((result.items || []).map((item) => [item.id, item]));
     } catch {

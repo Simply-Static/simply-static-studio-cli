@@ -1,6 +1,6 @@
 # Command Reference
 
-All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`.
+All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`. This reference covers release `0.1.5`.
 
 ## Root Commands
 
@@ -12,7 +12,7 @@ Sign in with email OTP, store a Personal Access Token, or store a Supabase sessi
 static-studio login [--email <email>] [--otp <code>] [--token <token>] [--refresh-token <token>] [--create-user]
 ```
 
-If `--token` is present, token login is used. Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token**, require an active paid subscription, and should be passed without `--refresh-token`. `--refresh-token` is only for Supabase session access tokens. Otherwise the CLI starts email OTP login.
+If `--token` is present, token login is used. Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token**. Issuance and exchange require an active subscription with quota greater than zero; trial status alone is not a categorical exclusion. Pass a Personal Access Token without `--refresh-token`, which is only for Supabase session access tokens. Otherwise the CLI starts email OTP login.
 
 ### `logout`
 
@@ -124,14 +124,16 @@ static-studio sites create [options]
 | `--name <name>` | generated | Site display name. |
 | `--subdomain <subdomain>` | generated | System-domain subdomain. |
 | `--tld <tld>` | `onstatic.studio` | System-domain TLD. |
-| `--url <url>` | derived | Public site URL. |
-| `--admin-url <url>` | derived | WordPress admin URL. |
+| `--url <url>` | derived | Managed Studio public URL. Custom domains are not accepted during creation. |
+| `--mount-path <path>` | none | Serve the static site below this public URL path, for example `/blog`. |
 | `--bedrock` | off | Create a Bedrock WordPress site. |
-| `--php-version <version>` | `8.3` | PHP version for the queued site. |
+| `--php-version <version>` | `8.3` | PHP version: `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, or `8.4`. |
 | `--migration-file <path>` | none | Upload a migration archive before queueing the site. |
 | `--allow-any-zip-name` | off | Skip Static Studio backup ZIP filename validation. |
 
-If `--migration-file` is supplied, the CLI uploads the file before queueing the site and prints upload metadata with the created site, queue result, and generated credentials.
+The public URL must be an HTTPS managed Studio hostname. Connect a custom domain after provisioning with `domains add` or `domains primary`. The former `--admin-url` option has been removed: the platform derives the admin URL and cryptographically generates the WordPress, Basic Auth, and secret credentials on the server. The command retrieves and prints those server-generated credentials.
+
+If `--migration-file` is supplied, the CLI uploads the file before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts and support archives up to 10 GB.
 
 ### `sites update`
 
@@ -195,6 +197,62 @@ Clear the CDN cache for a site.
 static-studio sites clear-cache <siteId>
 ```
 
+### `sites cancel-export`
+
+Cancel the site's currently active static export.
+
+```bash
+static-studio sites cancel-export <siteId> [--yes]
+```
+
+The site must currently be exporting. The command prompts unless `--yes` is supplied. Rollback exports cannot be cancelled through this command.
+
+### `sites migration-log`
+
+Show the site's migration log.
+
+```bash
+static-studio sites migration-log <siteId>
+```
+
+Plain output prints the log content. JSON output also includes its line count.
+
+### `sites releases`
+
+List recent production releases, newest first.
+
+```bash
+static-studio sites releases <siteId> [--limit <number>]
+```
+
+`--limit` defaults to `10` and accepts 1 to 100.
+
+### `sites rollback-status`
+
+Show rollback availability, state, and currently available snapshots.
+
+```bash
+static-studio sites rollback-status <siteId>
+```
+
+### `sites rollback-snapshots`
+
+Print only the available rollback snapshots.
+
+```bash
+static-studio sites rollback-snapshots <siteId>
+```
+
+### `sites rollback`
+
+Restore a static export snapshot.
+
+```bash
+static-studio sites rollback <siteId> <snapshotId> [--yes]
+```
+
+The snapshot must still be in the platform's current rollback set. The command prompts unless `--yes` is supplied.
+
 ## Domains
 
 ### `domains list`
@@ -231,13 +289,35 @@ Remove a custom domain.
 static-studio domains remove <siteId> <domain>
 ```
 
+### `domains mount`
+
+Set or clear the public mount path and start an export.
+
+```bash
+static-studio domains mount <siteId> <domain> [path]
+```
+
+For example, pass `/docs` to publish below that path. Omit `path` (or pass `/`) to clear the mount path. The command makes `<domain>` the stored public domain, updates routing, and starts an export.
+
 ### `domains issue-ssl`
 
 Request SSL issuance for a domain.
 
 ```bash
-static-studio domains issue-ssl <domain>
+static-studio domains issue-ssl <siteId> <domain>
 ```
+
+The site ID is required so the platform can verify domain ownership. For compatibility with the former single-domain syntax, `static-studio domains issue-ssl <domain> --site-id <siteId>` is also accepted.
+
+### `domains transfer`
+
+Move a custom domain from one site to another.
+
+```bash
+static-studio domains transfer <sourceSiteId> <targetSiteId> <domain> [--yes]
+```
+
+The authenticated user must be an administrator of both sites. The command confirms the move unless `--yes` is supplied; the platform updates the domain registry, site URLs, WordPress configuration, and routing for the affected sites.
 
 ## Account
 
@@ -254,6 +334,268 @@ static-studio account usage [--account-id <id>] [--include-subscription]
 | `--account-id <id>` | Account owner ID. Defaults to the authenticated user. |
 | `--include-subscription` | Include the latest subscription row. |
 
+## Site Health
+
+### `health overview`
+
+Show the latest deploy manifest and diff, current health snapshot, open issues, recent check results, and recent releases.
+
+```bash
+static-studio health overview <siteId> [--issue-limit <number>] [--result-limit <number>] [--release-limit <number>]
+```
+
+The defaults are 20 issues, 50 results, and 20 releases. Each limit accepts 1 to 100.
+
+### `health run`
+
+Run health checks for one or more sites.
+
+```bash
+static-studio health run <siteIds...> [--checks <types...>]
+```
+
+At most 25 sites can be checked at once. Without `--checks`, all checks run. Supported check names are:
+
+```text
+uptime, response_time, ssl, dns, cdn, static_freshness,
+robots, sitemap, indexability, ai_readiness
+```
+
+## Site Health Alerts
+
+Configurable alerts are available only to workspaces with the Lagos Agency alert entitlement. Lagos also requires manage access to the site.
+
+### `alerts status`
+
+Show alert settings, current rule conditions, open incidents, and recent delivery events.
+
+```bash
+static-studio alerts status <siteId>
+```
+
+### `alerts save`
+
+Save or pause alert settings.
+
+```bash
+static-studio alerts save <siteId> --enabled <state> [options]
+```
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--enabled <state>` | required | Turn the alert configuration on or off. |
+| `--recipients <emails...>` | none | Alert recipient addresses, normalized and deduplicated; maximum 10. |
+| `--uptime <state>` | on | Turn downtime alerts on or off. |
+| `--uptime-threshold <minutes>` | `10` | Alert after 5 to 1440 minutes of downtime. |
+| `--performance <state>` | on | Turn PageSpeed alerts on or off. |
+| `--performance-threshold <score>` | `70` | Alert below an integer score from 1 to 100. |
+| `--seo-critical <state>` | on | Turn critical SEO alerts on or off. |
+| `--notify-on-recovery <state>` | on | Send recovery notices after an incident clears. |
+
+Toggle states accept `on`/`off`, `true`/`false`, `yes`/`no`, or `1`/`0`. When alerts are enabled, at least one recipient and one rule are required. Thresholds are validated even when the configuration is paused.
+
+### `alerts test`
+
+Send a test alert to one or more recipients.
+
+```bash
+static-studio alerts test <siteId> <recipients...>
+```
+
+Addresses are normalized and deduplicated. At least one and at most 10 unique valid recipients are required.
+
+## SEO Files
+
+SEO file commands manage root-level files in the site's static storage. Paths cannot contain subdirectories, traversal segments, query strings, or fragments.
+
+### `seo list`
+
+```bash
+static-studio seo list <siteId>
+```
+
+List managed SEO files, including their content and last push state.
+
+### `seo save`
+
+```bash
+static-studio seo save <siteId> <path> (--content <text> | --file <path>) [--kind <kind>] [--mime-type <type>]
+```
+
+Create or update a file such as `robots.txt`, `llms.txt`, `sitemap.xml`, or a verification file. Provide exactly one content source. UTF-8 content may be at most 1 MiB; the platform infers file kind and MIME type when their options are omitted.
+
+### `seo delete`
+
+```bash
+static-studio seo delete <siteId> <path> [--yes]
+```
+
+Delete the file from static storage and mark its managed record deleted. The command prompts unless `--yes` is supplied.
+
+### `seo apply`
+
+```bash
+static-studio seo apply <siteId>
+```
+
+Push all active managed SEO files to static storage.
+
+### `seo check-sitemaps`
+
+```bash
+static-studio seo check-sitemaps <siteId>
+```
+
+Check `sitemap.xml` and `sitemap_index.xml` at the site's public URL and record the sitemap health result.
+
+## IndexNow
+
+### `indexnow status`
+
+```bash
+static-studio indexnow status <siteId>
+```
+
+Show the sanitized IndexNow setting, latest production release, eligible URL count, and any skip reason.
+
+### `indexnow enable`
+
+```bash
+static-studio indexnow enable <siteId>
+```
+
+Enable IndexNow and create or refresh its public verification key file.
+
+### `indexnow disable`
+
+```bash
+static-studio indexnow disable <siteId>
+```
+
+Disable IndexNow for the site.
+
+### `indexnow auto-submit`
+
+```bash
+static-studio indexnow auto-submit <siteId> <state>
+```
+
+Set automatic post-release submission. `state` accepts `on` or `off`; `true`/`false`, `yes`/`no`, and `1`/`0` are also accepted.
+
+### `indexnow submit`
+
+```bash
+static-studio indexnow submit <siteId> [--release-id <id>]
+```
+
+Submit the selected production release, or the latest release when `--release-id` is omitted. Enable IndexNow first so the site has a verification key.
+
+## Agency Reports
+
+Report history, PDFs, client links, and schedules require the applicable Lagos Agency entitlements. Lagos also enforces site read or manage access for each action. Report, share, and schedule IDs are UUIDs.
+
+### `reports list`
+
+List stored reports for a site, newest first.
+
+```bash
+static-studio reports list <siteId> [--limit <number>]
+```
+
+`--limit` defaults to `20` and accepts 1 to 200.
+
+### `reports get`
+
+Show one stored report.
+
+```bash
+static-studio reports get <reportId>
+```
+
+### `reports generate-pdf`
+
+Generate and store a PDF for an existing report.
+
+```bash
+static-studio reports generate-pdf <reportId>
+```
+
+This generates the PDF artifact; it does not create a new report record.
+
+### `reports pdf-url`
+
+Create a short-lived signed URL for a stored report PDF.
+
+```bash
+static-studio reports pdf-url <reportId>
+```
+
+The URL is valid for 10 minutes. Plain output prints only the URL; JSON output returns `{ "url": "..." }`.
+
+### `reports shares`
+
+List client share links for a report.
+
+```bash
+static-studio reports shares <reportId>
+```
+
+### `reports share`
+
+Create a client share link.
+
+```bash
+static-studio reports share <reportId> [--recipient <email>] [--password-env <variable>] [--expires-at <timestamp>]
+```
+
+`--expires-at` must be a future date and time. To password-protect a link, set the secret through your environment or secret manager, then name that variable with `--password-env`. The variable name must be a valid shell-style environment name and its value must be nonempty. There is deliberately no plaintext `--password` option, which keeps the password out of command arguments and process listings.
+
+### `reports revoke-share`
+
+Revoke a client share link.
+
+```bash
+static-studio reports revoke-share <reportId> <shareId> [--yes]
+```
+
+The command prompts unless `--yes` is supplied.
+
+### `reports schedules`
+
+List report schedules, optionally scoped to one site.
+
+```bash
+static-studio reports schedules [siteId]
+```
+
+### `reports schedule`
+
+Create or update a weekly or monthly schedule.
+
+```bash
+static-studio reports schedule <cadence> <siteIds...> [--schedule-id <id>] [--name <name>] [--auto-share <state>] [--recipient <email>]
+```
+
+`cadence` must be `weekly` or `monthly`. Provide 1 to 100 site IDs; duplicates are removed, and multiple sites create a portfolio schedule within one entitled workspace. Use `--schedule-id` to update an existing schedule. Names may be at most 200 characters. `--auto-share` accepts `on`/`off`, `true`/`false`, `yes`/`no`, or `1`/`0`; when it is on, `--recipient` is required.
+
+### `reports disable-schedule`
+
+Disable a schedule without deleting it.
+
+```bash
+static-studio reports disable-schedule <scheduleId>
+```
+
+### `reports delete-schedule`
+
+Delete a schedule.
+
+```bash
+static-studio reports delete-schedule <scheduleId> [--yes]
+```
+
+The command prompts unless `--yes` is supplied.
+
 ## Performance
 
 ### `performance run`
@@ -267,7 +609,7 @@ static-studio performance run <siteId> [--force] [--url <url>]
 | Option | Description |
 | --- | --- |
 | `--force` | Ignore cached PageSpeed reports. |
-| `--url <url>` | Test a URL instead of the stored site URL. Must use HTTP or HTTPS. |
+| `--url <url>` | Deprecated compatibility option. If supplied, it must normalize to the site's stored URL. |
 
 ### `performance stats`
 
@@ -286,6 +628,8 @@ Run a performance test and fetch CDN statistics in one command.
 ```bash
 static-studio performance get <siteId> [--force] [--url <url>]
 ```
+
+As with `performance run`, `--url` is deprecated and cannot select a different target.
 
 ### `performance reports`
 
@@ -354,6 +698,46 @@ static-studio environments disable <siteId> [--yes]
 ```
 
 Prompts for confirmation unless `--yes` is supplied.
+
+### `environments domain-list`
+
+List the managed Studio hostname and any custom hostname attached to an environment.
+
+```bash
+static-studio environments domain-list <siteId> <environment>
+```
+
+`<environment>` may identify the environment by ID, name, slug, or title. The parent site must be fully deployed before any environment domain command can run.
+
+### `environments domain-connect`
+
+Connect or replace the environment's custom domain.
+
+```bash
+static-studio environments domain-connect <siteId> <environment> <domain>
+```
+
+An environment can have one custom domain. Connecting a different hostname removes the existing custom hostname first, preserves the managed Studio hostname, updates WordPress and edge routing, and returns any non-fatal synchronization warnings.
+
+### `environments domain-remove`
+
+Remove all custom hostnames from an environment.
+
+```bash
+static-studio environments domain-remove <siteId> <environment> [--yes]
+```
+
+The command prompts unless `--yes` is supplied. It restores the managed Studio hostname as the WordPress and routing fallback; if no custom hostname exists, it reports the environment unchanged.
+
+### `environments domain-ssl`
+
+Request SSL for a hostname already attached to the environment.
+
+```bash
+static-studio environments domain-ssl <siteId> <environment> <domain>
+```
+
+The hostname must already appear in `environments domain-list`. SSL is requested only for that hostname, without an automatic `www` secondary hostname.
 
 ## Tags
 
@@ -546,6 +930,8 @@ static-studio redirects bulk-create <siteId> <file> [--pull-zone-id <id>] [--dom
 See [Input formats and limits](input-formats-and-limits.md#bulk-redirect-files) for the file format.
 
 ## Users
+
+WordPress role options support `administrator`, `editor`, `author`, and `contributor`. The `subscriber` role is not supported.
 
 ### `users list`
 

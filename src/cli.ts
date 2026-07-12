@@ -3,22 +3,71 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { Command } from "commander";
 import { getAccountUsage } from "./account.js";
+import { getSiteAlerts, saveSiteAlerts, sendTestSiteAlert } from "./alerts.js";
 import { loginWithEmail, loginWithToken, logout } from "./auth.js";
 import { getConfigPath } from "./config.js";
-import { addDomain, getHostnames, issueSsl, removeDomain, setPrimaryDomain } from "./domains.js";
 import {
+  addDomain,
+  getHostnames,
+  issueSsl,
+  removeDomain,
+  setMountPath,
+  setPrimaryDomain,
+  transferDomain,
+} from "./domains.js";
+import {
+  cancelExport,
+  getMigrationLog,
+  getRollbackStatus,
+  listProductionSiteReleases,
+  listRollbackSnapshots,
+  startRollback,
+} from "./deployments.js";
+import {
+  connectEnvironmentDomain,
   createEnvironment,
   deleteEnvironment,
   disableEnvironments,
   enableEnvironments,
   getEnvironmentStatus,
+  issueEnvironmentSsl,
+  listEnvironmentHostnames,
+  removeEnvironmentDomains,
 } from "./environments.js";
 import { CliError, cliErrorExitCode, cliErrorJson, cliErrorMessage } from "./errors.js";
+import {
+  MAX_SEO_FILE_BYTES,
+  applySeoFiles,
+  checkSitemaps,
+  deleteSeoFile,
+  disableIndexNow,
+  enableIndexNow,
+  getHealthOverview,
+  getIndexNowStatus,
+  listSeoFiles,
+  runHealthCheck,
+  saveSeoFile,
+  setIndexNowAutoSubmit,
+  submitIndexNow,
+} from "./health.js";
 import { getDebugLog } from "./logs.js";
 import { printValue } from "./output.js";
 import { getSiteStatistics, listPerformanceReports, runPerformanceTest } from "./performance.js";
 import { confirm } from "./prompt.js";
 import { deleteSshKey, getSshInfo, listBackups, queueBackup, queueSshKey } from "./queues.js";
+import {
+  createReportShare,
+  deleteReportSchedule,
+  disableReportSchedule,
+  generateReportPdf,
+  getReportById,
+  getSignedReportPdfUrl,
+  listReportSchedules,
+  listReportShares,
+  listReportsBySite,
+  revokeReportShare,
+  saveReportSchedule,
+} from "./reports.js";
 import {
   bulkCreateRedirects,
   createRedirect,
@@ -50,7 +99,13 @@ import { assignTagToSite, createTag, deleteTag, listSiteTags, listTags, removeTa
 import { bulkInviteTeamMembers, listTeamMembers, parseEmailInputFile, removeTeamMember } from "./team.js";
 import { uploadMigrationFile } from "./upload.js";
 import { addExistingUser, inviteUser, listUsers, makeAdmin, removeUser } from "./users.js";
-import { normalizeEmailList, parsePositiveInteger } from "./validation.js";
+import {
+  assertReadableFileWithinLimit,
+  normalizeEmailList,
+  normalizeMountPath,
+  parsePositiveInteger,
+  requireAllowedValue,
+} from "./validation.js";
 import type { CommandGlobals } from "./types.js";
 
 const program = new Command();
@@ -107,6 +162,25 @@ function redirectUpdateOptions(opts: ParsedOptions): { fromPath?: string; toPath
     ...(opts.active ? { isActive: true } : {}),
     ...(opts.inactive ? { isActive: false } : {}),
   };
+}
+
+function parseToggle(value: string, label: string): boolean {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["on", "true", "yes", "1"].includes(normalized)) return true;
+  if (["off", "false", "no", "0"].includes(normalized)) return false;
+  throw new CliError(`${label} must be on or off.`);
+}
+
+function readSecretEnvironmentVariable(name: string, label: string): string {
+  const variable = String(name || "").trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) {
+    throw new CliError(`${label} environment variable name is invalid.`);
+  }
+  const value = process.env[variable];
+  if (value === undefined || value === "") {
+    throw new CliError(`${label} environment variable ${variable} is not set.`);
+  }
+  return value;
 }
 
 function printDebugLogResult(cmd: Command, result: Awaited<ReturnType<typeof getDebugLog>>, outputFile?: string): void {
@@ -279,20 +353,25 @@ sites
   .option("--name <name>", "site display name")
   .option("--subdomain <subdomain>", "system-domain subdomain")
   .option("--tld <tld>", "system-domain TLD", "onstatic.studio")
-  .option("--url <url>", "public site URL")
-  .option("--admin-url <url>", "WordPress admin URL")
+  .option("--url <url>", "managed Studio site URL")
+  .option("--mount-path <path>", "serve the static site below this URL path")
   .option("--bedrock", "create a Bedrock WordPress site")
   .option("--php-version <version>", "PHP version", "8.3")
   .option("--migration-file <path>", "upload a migration archive before queueing the site")
   .option("--allow-any-zip-name", "skip Static Studio backup ZIP filename check")
   .action(async (opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
+      const phpVersion = requireAllowedValue(
+        String(opts.phpVersion || "8.3"),
+        ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"] as const,
+        "PHP version",
+      );
+      const mountPath = normalizeMountPath(opts.mountPath);
       const seed = generateSiteSeed({
         name: opts.name,
         subdomain: opts.subdomain,
         tld: opts.tld,
         url: opts.url,
-        adminUrl: opts.adminUrl,
       });
 
       let upload: unknown = null;
@@ -317,7 +396,8 @@ sites
         userId: user.id,
         bedrock: Boolean(opts.bedrock),
         hasMigration: Boolean(opts.migrationFile),
-        phpVersion: opts.phpVersion,
+        phpVersion,
+        mountPath,
       });
 
       print(cmd, { ...result, upload });
@@ -418,6 +498,70 @@ sites
     });
   });
 
+sites
+  .command("cancel-export <siteId>")
+  .description("cancel the site's active static export")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Cancel the active export for site ${siteId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await cancelExport(supabase, siteId));
+    });
+  });
+
+sites
+  .command("migration-log <siteId>")
+  .description("show the site's migration log")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const result = await getMigrationLog(supabase, siteId);
+      print(cmd, globals(cmd).json ? result : result.content);
+    });
+  });
+
+sites
+  .command("releases <siteId>")
+  .description("list recent production releases")
+  .option("--limit <number>", "number of releases", "10")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listProductionSiteReleases(supabase, siteId, Number(opts.limit)));
+    });
+  });
+
+sites
+  .command("rollback-status <siteId>")
+  .description("show rollback availability and state")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getRollbackStatus(supabase, siteId));
+    });
+  });
+
+sites
+  .command("rollback-snapshots <siteId>")
+  .description("list available rollback snapshots")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listRollbackSnapshots(supabase, siteId));
+    });
+  });
+
+sites
+  .command("rollback <siteId> <snapshotId>")
+  .description("restore a static export snapshot")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, snapshotId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Roll back site ${siteId} to snapshot ${snapshotId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await startRollback(supabase, siteId, snapshotId));
+    });
+  });
+
 const domains = program.command("domains").description("manage domains and SSL");
 
 domains
@@ -459,11 +603,48 @@ domains
   });
 
 domains
-  .command("issue-ssl <domain>")
-  .description("request SSL issuance for a domain")
-  .action(async (domain: string, _localOpts: ParsedOptions, cmd: Command) => {
+  .command("mount <siteId> <domain> [path]")
+  .description("set or clear the site's public mount path")
+  .action(async (siteId: string, domain: string, path: string | undefined, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await issueSsl(supabase, domain));
+      print(cmd, await setMountPath(supabase, siteId, domain, path || ""));
+    });
+  });
+
+domains
+  .command("issue-ssl <siteOrDomain> [domain]")
+  .description("request SSL issuance for a domain")
+  .option("--site-id <siteId>", "site ID for the legacy single-domain syntax")
+  .action(async (siteOrDomain: string, domain: string | undefined, opts: ParsedOptions, cmd: Command) => {
+    const siteId = domain ? siteOrDomain : opts.siteId;
+    const hostname = domain || siteOrDomain;
+    if (!siteId) {
+      throw new CliError("A site ID is required. Use `domains issue-ssl <siteId> <domain>`.");
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await issueSsl(supabase, siteId, hostname));
+    });
+  });
+
+domains
+  .command("transfer <sourceSiteId> <targetSiteId> <domain>")
+  .description("move a custom domain between sites you administer")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (
+    sourceSiteId: string,
+    targetSiteId: string,
+    domain: string,
+    opts: ParsedOptions,
+    cmd: Command,
+  ) => {
+    if (
+      !opts.yes &&
+      !(await confirm(`Move ${domain} from site ${sourceSiteId} to site ${targetSiteId}?`))
+    ) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await transferDomain(supabase, sourceSiteId, targetSiteId, domain));
     });
   });
 
@@ -482,13 +663,344 @@ account
     });
   });
 
+const health = program.command("health").description("inspect and run Site Health checks");
+
+health
+  .command("overview <siteId>")
+  .description("show health, deploy, issue, and release data for a site")
+  .option("--issue-limit <number>", "maximum open issues", "20")
+  .option("--result-limit <number>", "maximum recent check results", "50")
+  .option("--release-limit <number>", "maximum recent releases", "20")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getHealthOverview(supabase, siteId, {
+        issueLimit: Number(opts.issueLimit),
+        resultLimit: Number(opts.resultLimit),
+        releaseLimit: Number(opts.releaseLimit),
+      }));
+    });
+  });
+
+health
+  .command("run <siteIds...>")
+  .description("run health checks for one or more sites")
+  .option("--checks <types...>", "specific checks to run")
+  .action(async (siteIds: string[], opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await runHealthCheck(supabase, siteIds, opts.checks));
+    });
+  });
+
+const alerts = program.command("alerts").description("manage Site Health alerts");
+
+alerts
+  .command("status <siteId>")
+  .description("show alert settings, conditions, incidents, and events")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getSiteAlerts(supabase, siteId));
+    });
+  });
+
+alerts
+  .command("save <siteId>")
+  .description("save Site Health alert settings")
+  .requiredOption("--enabled <state>", "turn alerts on or off")
+  .option("--recipients <emails...>", "alert recipient email addresses")
+  .option("--uptime <state>", "turn uptime alerts on or off")
+  .option("--uptime-threshold <minutes>", "downtime threshold in minutes", "10")
+  .option("--performance <state>", "turn performance alerts on or off")
+  .option("--performance-threshold <score>", "minimum PageSpeed score", "70")
+  .option("--seo-critical <state>", "turn critical SEO alerts on or off")
+  .option("--notify-on-recovery <state>", "turn recovery notices on or off")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await saveSiteAlerts(supabase, siteId, {
+        enabled: parseToggle(opts.enabled, "enabled"),
+        recipients: opts.recipients || [],
+        ...(opts.uptime === undefined ? {} : { uptimeEnabled: parseToggle(opts.uptime, "uptime") }),
+        uptimeThresholdMinutes: Number(opts.uptimeThreshold),
+        ...(opts.performance === undefined
+          ? {}
+          : { performanceEnabled: parseToggle(opts.performance, "performance") }),
+        performanceThreshold: Number(opts.performanceThreshold),
+        ...(opts.seoCritical === undefined
+          ? {}
+          : { seoCriticalEnabled: parseToggle(opts.seoCritical, "seo-critical") }),
+        ...(opts.notifyOnRecovery === undefined
+          ? {}
+          : { notifyOnRecovery: parseToggle(opts.notifyOnRecovery, "notify-on-recovery") }),
+      }));
+    });
+  });
+
+alerts
+  .command("test <siteId> <recipients...>")
+  .description("send a test Site Health alert")
+  .action(async (siteId: string, recipients: string[], _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await sendTestSiteAlert(supabase, siteId, recipients));
+    });
+  });
+
+const seo = program.command("seo").description("manage root-level SEO files");
+
+seo
+  .command("list <siteId>")
+  .description("list managed SEO files")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listSeoFiles(supabase, siteId));
+    });
+  });
+
+seo
+  .command("save <siteId> <path>")
+  .description("create or update a root-level SEO file")
+  .option("--content <text>", "file content")
+  .option("--file <path>", "read content from a local file")
+  .option("--kind <kind>", "SEO file kind")
+  .option("--mime-type <type>", "file MIME type")
+  .action(async (siteId: string, path: string, opts: ParsedOptions, cmd: Command) => {
+    if ((opts.content === undefined) === (opts.file === undefined)) {
+      throw new CliError("Provide exactly one of --content or --file.");
+    }
+    let content = String(opts.content ?? "");
+    if (opts.file) {
+      await assertReadableFileWithinLimit(opts.file, MAX_SEO_FILE_BYTES);
+      content = await readFile(opts.file, "utf8");
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await saveSeoFile(supabase, siteId, {
+        path,
+        content,
+        ...(opts.kind ? { fileKind: opts.kind } : {}),
+        ...(opts.mimeType ? { mimeType: opts.mimeType } : {}),
+      }));
+    });
+  });
+
+seo
+  .command("delete <siteId> <path>")
+  .description("delete a managed SEO file")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, path: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Delete SEO file ${path} from site ${siteId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await deleteSeoFile(supabase, siteId, path));
+    });
+  });
+
+seo
+  .command("apply <siteId>")
+  .description("push all managed SEO files to the site's static storage")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await applySeoFiles(supabase, siteId));
+    });
+  });
+
+seo
+  .command("check-sitemaps <siteId>")
+  .description("check common sitemap files on the public site")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await checkSitemaps(supabase, siteId));
+    });
+  });
+
+const indexNow = program.command("indexnow").description("manage IndexNow submissions");
+
+indexNow
+  .command("status <siteId>")
+  .description("show IndexNow settings and submission state")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getIndexNowStatus(supabase, siteId));
+    });
+  });
+
+indexNow
+  .command("enable <siteId>")
+  .description("enable IndexNow for a site")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await enableIndexNow(supabase, siteId));
+    });
+  });
+
+indexNow
+  .command("disable <siteId>")
+  .description("disable IndexNow for a site")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await disableIndexNow(supabase, siteId));
+    });
+  });
+
+indexNow
+  .command("auto-submit <siteId> <state>")
+  .description("turn automatic post-release submission on or off")
+  .action(async (siteId: string, state: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await setIndexNowAutoSubmit(supabase, siteId, parseToggle(state, "state")));
+    });
+  });
+
+indexNow
+  .command("submit <siteId>")
+  .description("submit the latest or a selected release to IndexNow")
+  .option("--release-id <id>", "release ID to submit")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await submitIndexNow(supabase, siteId, {
+        ...(opts.releaseId ? { releaseId: opts.releaseId } : {}),
+      }));
+    });
+  });
+
+const reports = program.command("reports").description("inspect and share Agency reports");
+
+reports
+  .command("list <siteId>")
+  .description("list reports for a site")
+  .option("--limit <number>", "number of reports", "20")
+  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listReportsBySite(supabase, siteId, Number(opts.limit)));
+    });
+  });
+
+reports
+  .command("get <reportId>")
+  .description("show a stored report")
+  .action(async (reportId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getReportById(supabase, reportId));
+    });
+  });
+
+reports
+  .command("generate-pdf <reportId>")
+  .description("generate and store a report PDF")
+  .action(async (reportId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await generateReportPdf(supabase, reportId));
+    });
+  });
+
+reports
+  .command("pdf-url <reportId>")
+  .description("create a short-lived signed URL for a report PDF")
+  .action(async (reportId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const url = await getSignedReportPdfUrl(supabase, reportId);
+      print(cmd, globals(cmd).json ? { url } : url);
+    });
+  });
+
+reports
+  .command("shares <reportId>")
+  .description("list client share links for a report")
+  .action(async (reportId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listReportShares(supabase, reportId));
+    });
+  });
+
+reports
+  .command("share <reportId>")
+  .description("create a client share link")
+  .option("--recipient <email>", "recipient email")
+  .option("--password-env <variable>", "read the optional share password from an environment variable")
+  .option("--expires-at <timestamp>", "future expiration time")
+  .action(async (reportId: string, opts: ParsedOptions, cmd: Command) => {
+    const password = opts.passwordEnv
+      ? readSecretEnvironmentVariable(opts.passwordEnv, "Report password")
+      : undefined;
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await createReportShare(supabase, reportId, {
+        ...(opts.recipient ? { recipientEmail: opts.recipient } : {}),
+        ...(password ? { password } : {}),
+        ...(opts.expiresAt ? { expiresAt: opts.expiresAt } : {}),
+      }));
+    });
+  });
+
+reports
+  .command("revoke-share <reportId> <shareId>")
+  .description("revoke a client share link")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (reportId: string, shareId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Revoke report share ${shareId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await revokeReportShare(supabase, reportId, shareId));
+    });
+  });
+
+reports
+  .command("schedules [siteId]")
+  .description("list report schedules")
+  .action(async (siteId: string | undefined, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listReportSchedules(supabase, siteId));
+    });
+  });
+
+reports
+  .command("schedule <cadence> <siteIds...>")
+  .description("create or update a weekly or monthly report schedule")
+  .option("--schedule-id <id>", "existing schedule UUID")
+  .option("--name <name>", "schedule name")
+  .option("--auto-share <state>", "turn automatic client sharing on or off")
+  .option("--recipient <email>", "automatic-share recipient")
+  .action(async (cadence: string, siteIds: string[], opts: ParsedOptions, cmd: Command) => {
+    const autoShare = opts.autoShare === undefined
+      ? undefined
+      : parseToggle(opts.autoShare, "auto-share");
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await saveReportSchedule(supabase, siteIds, cadence, {
+        ...(opts.scheduleId ? { scheduleId: opts.scheduleId } : {}),
+        ...(opts.name ? { name: opts.name } : {}),
+        ...(autoShare === undefined ? {} : { autoShare }),
+        ...(opts.recipient ? { recipientEmail: opts.recipient } : {}),
+      }));
+    });
+  });
+
+reports
+  .command("disable-schedule <scheduleId>")
+  .description("disable a report schedule")
+  .action(async (scheduleId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await disableReportSchedule(supabase, scheduleId));
+    });
+  });
+
+reports
+  .command("delete-schedule <scheduleId>")
+  .description("delete a report schedule")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (scheduleId: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Delete report schedule ${scheduleId}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await deleteReportSchedule(supabase, scheduleId));
+    });
+  });
+
 const performance = program.command("performance").description("run and inspect performance data");
 
 performance
   .command("run <siteId>")
   .description("run a PageSpeed and global TTFB performance test")
   .option("--force", "ignore cached PageSpeed report")
-  .option("--url <url>", "test a URL instead of the stored site URL")
+  .option("--url <url>", "deprecated; must match the stored site URL")
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await runPerformanceTest(supabase, siteId, {
@@ -511,7 +1023,7 @@ performance
   .command("get <siteId>")
   .description("run a performance test and fetch CDN statistics")
   .option("--force", "ignore cached PageSpeed report")
-  .option("--url <url>", "test a URL instead of the stored site URL")
+  .option("--url <url>", "deprecated; must match the stored site URL")
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       const [pagespeed, statistics] = await Promise.all([
@@ -609,6 +1121,58 @@ environments
     }
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await disableEnvironments(supabase, siteId));
+    });
+  });
+
+environments
+  .command("domain-list <siteId> <environment>")
+  .description("list managed and custom hostnames for an environment")
+  .action(async (siteId: string, environment: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await listEnvironmentHostnames(supabase, siteId, environment));
+    });
+  });
+
+environments
+  .command("domain-connect <siteId> <environment> <domain>")
+  .description("connect or replace an environment custom domain")
+  .action(async (
+    siteId: string,
+    environment: string,
+    domain: string,
+    _localOpts: ParsedOptions,
+    cmd: Command,
+  ) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await connectEnvironmentDomain(supabase, siteId, environment, domain));
+    });
+  });
+
+environments
+  .command("domain-remove <siteId> <environment>")
+  .description("remove all custom domains from an environment")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (siteId: string, environment: string, opts: ParsedOptions, cmd: Command) => {
+    if (!opts.yes && !(await confirm(`Remove all custom domains from environment ${environment}?`))) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await removeEnvironmentDomains(supabase, siteId, environment));
+    });
+  });
+
+environments
+  .command("domain-ssl <siteId> <environment> <domain>")
+  .description("request SSL for an environment hostname")
+  .action(async (
+    siteId: string,
+    environment: string,
+    domain: string,
+    _localOpts: ParsedOptions,
+    cmd: Command,
+  ) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await issueEnvironmentSsl(supabase, siteId, environment, domain));
     });
   });
 

@@ -3,9 +3,13 @@ import { DEFAULT_TLD } from "./constants.js";
 import { CliError } from "./errors.js";
 import {
   basicAuthCredentialsFromMeta,
+  clearCache,
+  createSite,
   generateSiteSeed,
   getMagicLoginLink,
   listSites,
+  normalizeManagedSiteUrl,
+  siteSummaryRows,
   sitePushModeToExportType,
 } from "./sites.js";
 import { createSupabaseMock } from "./test-utils.js";
@@ -27,17 +31,28 @@ describe("generateSiteSeed", () => {
     });
   });
 
-  it("preserves explicit URLs", () => {
+  it("derives upload routing and the admin URL from explicit managed URLs", () => {
     const seed = generateSiteSeed({
       name: "Example",
-      subdomain: "demo",
-      tld: "example.test",
-      url: "https://custom.example",
-      adminUrl: "https://wp.custom.example/wp-admin",
+      url: "https://custom.static1.studio",
+      adminUrl: "https://ignored.example/wp-admin",
     });
 
-    expect(seed.url).toBe("https://custom.example");
-    expect(seed.adminUrl).toBe("https://wp.custom.example/wp-admin");
+    expect(seed).toMatchObject({
+      subdomain: "custom",
+      tld: "static1.studio",
+      url: "https://custom.static1.studio",
+      adminUrl: "https://wp.custom.static1.studio/wp-admin",
+    });
+  });
+
+  it("rejects custom hosts and mismatched upload subdomains before provisioning", () => {
+    expect(() => normalizeManagedSiteUrl("https://example.com")).toThrow("managed Studio");
+    expect(() => generateSiteSeed({
+      subdomain: "other",
+      url: "https://demo.onstatic.studio",
+    })).toThrow("must match");
+    expect(() => generateSiteSeed({ name: " ".repeat(201) })).toThrow("Site name");
   });
 });
 
@@ -116,9 +131,204 @@ describe("getMagicLoginLink", () => {
       },
     ]);
   });
+
+  it("uses the canonical static_site_record_id when a legacy alias also exists", async () => {
+    const { supabase, functionCalls } = createSupabaseMock((table) => {
+      if (table === "site") {
+        return {
+          data: {
+            id: "site-1",
+            static_site_id: "legacy-static-id",
+            static_site_record_id: "canonical-static-id",
+          },
+          error: null,
+        };
+      }
+      if (table === "site_meta") {
+        return { data: { site_id: "site-1", email: "person@example.com" }, error: null };
+      }
+      return { data: null, error: null };
+    }, { url: "https://wp.example.test/wp-admin" });
+
+    await getMagicLoginLink(supabase, "site-1", "person@example.com");
+
+    expect(functionCalls[0]).toEqual({
+      name: "get-magic-link",
+      body: {
+        siteId: "site-1",
+        staticSiteId: "canonical-static-id",
+        email: "person@example.com",
+      },
+    });
+  });
+});
+
+describe("createSite", () => {
+  const serverCredentials = {
+    site_id: "42",
+    email: "person@example.com",
+    username: "server-user",
+    password: "server-password",
+    basic_auth_user: "server-basic-user",
+    basic_auth_password: "server-basic-password",
+    admin_url: "https://wp-demo.onstatic.studio/wp-admin",
+    secret_key: "server-secret",
+  };
+
+  it("uses server-generated credentials and the reduced Lagos queue payload", async () => {
+    const { supabase, functionCalls } = createSupabaseMock(
+      { site_meta: { data: serverCredentials, error: null } },
+      (name) => name === "create-site-record"
+        ? { site: { id: "42", name: "Example", url: "https://demo.onstatic.studio" } }
+        : { message: "Site queued" },
+    );
+
+    await expect(createSite(supabase, {
+      name: "Example",
+      subdomain: "demo",
+      email: "person@example.com",
+      userId: "user-1",
+      mountPath: " /blog/ ",
+      hasMigration: true,
+      phpVersion: "8.4",
+    })).resolves.toMatchObject({
+      site: { id: "42" },
+      credentials: {
+        username: "server-user",
+        password: "server-password",
+        basic_auth_user: "server-basic-user",
+        basic_auth_password: "server-basic-password",
+        admin_url: "https://wp-demo.onstatic.studio/wp-admin",
+        secret_key: "server-secret",
+      },
+    });
+
+    expect(functionCalls).toEqual([
+      {
+        name: "create-site-record",
+        body: {
+          url: "https://demo.onstatic.studio",
+          name: "Example",
+          email: "person@example.com",
+          user_id: "user-1",
+          mount_path: "/blog",
+        },
+      },
+      {
+        name: "queue-site",
+        body: {
+          siteHasMigration: true,
+          site_id: "42",
+          apiVersion: 2,
+          phpVersion: "8.4",
+        },
+      },
+    ]);
+  });
+
+  it("reports when the server-created credential record is incomplete", async () => {
+    const { password: _password, ...incompleteCredentials } = serverCredentials;
+    const { supabase } = createSupabaseMock(
+      { site_meta: { data: incompleteCredentials, error: null } },
+      (name) => name === "create-site-record"
+        ? { site: { id: "42", name: "Example", url: "https://demo.onstatic.studio" } }
+        : { message: "Site queued" },
+    );
+
+    await expect(createSite(supabase, {
+      name: "Example",
+      subdomain: "demo",
+      email: "person@example.com",
+      userId: "user-1",
+    })).rejects.toThrow("password was missing from its server-generated credentials");
+  });
+
+  it("rejects unsupported PHP versions before creating a site record", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
+
+    await expect(createSite(supabase, {
+      name: "Example",
+      subdomain: "demo",
+      email: "person@example.com",
+      userId: "user-1",
+      phpVersion: "9.0",
+    })).rejects.toThrow("PHP version must be one of");
+    expect(functionCalls).toEqual([]);
+  });
+});
+
+describe("clearCache", () => {
+  it("resolves the site pull zone and sends the hardened pull_zone payload", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({
+      site: { data: { id: "site-1", pull_zone_id: 501 }, error: null },
+    });
+
+    await clearCache(supabase, "site-1");
+
+    expect(functionCalls).toEqual([
+      { name: "clear-cache", body: { pull_zone: 501 } },
+    ]);
+  });
+
+  it("does not invoke cache clearing before a pull zone exists", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({
+      site: { data: { id: "site-1", pull_zone_id: null }, error: null },
+    });
+
+    await expect(clearCache(supabase, "site-1")).rejects.toThrow("does not have a pull_zone_id");
+    expect(functionCalls).toEqual([]);
+  });
+});
+
+describe("siteSummaryRows", () => {
+  it("shows the mounted public URL while retaining the Studio base URL", () => {
+    expect(siteSummaryRows([{
+      id: "site-1",
+      name: "Mounted Site",
+      url: "https://example.com/",
+      mount_path: "/blog/",
+      status: "deployed",
+    }])).toEqual([{
+      id: "site-1",
+      name: "Mounted Site",
+      url: "https://example.com/blog",
+      base_url: "https://example.com/",
+      mount_path: "/blog",
+      status: "deployed",
+      created_at: undefined,
+    }]);
+  });
 });
 
 describe("listSites validation", () => {
+  it("keeps team sites visible while scoping metadata and quoting search filters", async () => {
+    const { supabase, calls } = createSupabaseMock((table) =>
+      table === "subscription"
+        ? { data: null, error: null }
+        : { data: [], error: null, count: 0 },
+    );
+
+    await listSites(
+      supabase,
+      { id: "user-1", email: "person@example.com" },
+      { search: 'client "alpha"' },
+    );
+
+    expect(calls).toContainEqual({
+      table: "site",
+      method: "eq",
+      args: ["site_meta.email", "person@example.com"],
+    });
+    expect(calls).toContainEqual({
+      table: "site",
+      method: "or",
+      args: ['name.ilike."%client \\"alpha\\"%",url.ilike."%client \\"alpha\\"%"'],
+    });
+    const select = calls.find((call) => call.table === "site" && call.method === "select");
+    expect(String(select?.args[0])).toContain("site_meta(email");
+    expect(String(select?.args[0])).not.toContain("site_meta!inner");
+  });
+
   it("rejects unsafe sort fields before querying", async () => {
     const { supabase } = createSupabaseMock({ site: { data: [], error: null, count: 0 } });
     await expect(

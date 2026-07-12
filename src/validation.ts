@@ -110,6 +110,31 @@ export function normalizeEnvironmentTitle(value: string): string {
   return title;
 }
 
+export function normalizeMountPath(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "/") return "";
+
+  let path = raw;
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      throw new CliError("Mount path must be a valid URL path, for example /blog.");
+    }
+  }
+
+  path = path.split("?")[0]?.split("#")[0]?.trim() || "";
+  if (!path || path === "/") return "";
+  if (!path.startsWith("/")) path = `/${path}`;
+  path = path.replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+
+  if (path.includes("..") || !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$/.test(path)) {
+    throw new CliError("Mount path must be a safe URL path, for example /blog.");
+  }
+
+  return path;
+}
+
 export function environmentSlug(value: string): string {
   return value
     .toLowerCase()

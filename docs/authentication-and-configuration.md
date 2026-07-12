@@ -51,7 +51,7 @@ Personal Access Token login:
 static-studio login --token "$STATIC_STUDIO_ACCESS_TOKEN"
 ```
 
-Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. They require an active paid subscription; free trial accounts can open the CLI token screen, but the token field and regeneration action remain locked until the account subscribes.
+Generate Personal Access Tokens in the Static Studio app under **Account -> Access Token**. Issuing and exchanging a token requires a subscription whose status is `active` and whose quota is greater than zero. Trial status is not checked as a separate categorical exclusion, so an eligible trial account can use a token.
 
 The CLI exchanges a Personal Access Token through the platform `access-token` Edge Function for a short-lived Supabase access token. Personal Access Tokens do not have refresh tokens, and the exchange response intentionally does not include one.
 

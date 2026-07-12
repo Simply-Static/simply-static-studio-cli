@@ -39,8 +39,10 @@ export interface SiteRecord {
   notes?: string | null;
   pull_zone_id?: string | number | null;
   storage_zone_id?: string | number | null;
+  static_site_id?: string | number | null;
   static_site_record_id?: string | number | null;
   site_id?: string | number | null;
+  mount_path?: string | null;
   bedrock?: boolean | null;
   [key: string]: unknown;
 }
