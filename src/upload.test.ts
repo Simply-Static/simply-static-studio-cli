@@ -172,6 +172,51 @@ describe("migration uploads", () => {
     expect(progress.at(-1)).toEqual({ loaded: PART_SIZE + 3, total: PART_SIZE + 3 });
   });
 
+  it("uses the server-generated identity for new-site migration uploads", async () => {
+    const filePath = join(directory, "new-studio-backup-1.zip");
+    writeFileSync(filePath, "zip");
+    const { supabase, bodies } = protocolClient((body) => {
+      if (body.action === "init") {
+        return {
+          token: "new-site-token",
+          partCount: 1,
+          key: "public/site-migration-ab1234567890123.zip",
+          siteIdentifier: "ab1234567890123",
+        };
+      }
+      if (body.action === "sign_parts") {
+        return { urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }] };
+      }
+      if (body.action === "complete") {
+        return {
+          ok: true,
+          key: "public/site-migration-ab1234567890123.zip",
+          migrationToken: "signed-creation-token",
+        };
+      }
+      throw new Error(`Unexpected action: ${body.action}`);
+    });
+    vi.stubGlobal("fetch", async () =>
+      new Response(null, { status: 200, headers: { etag: "new-site-etag" } })
+    );
+
+    await expect(uploadMigrationFile(supabase, {
+      filePath,
+      newSite: true,
+    })).resolves.toEqual({
+      bucket: "site_migrations",
+      key: "public/site-migration-ab1234567890123.zip",
+      size: 3,
+      siteIdentifier: "ab1234567890123",
+      migrationToken: "signed-creation-token",
+    });
+    expect(bodies[0]).toMatchObject({
+      action: "init",
+      key: "public/site-migration-pending.zip",
+      purpose: "new_site",
+    });
+  });
+
   it("retries a failed part without double-counting progress", async () => {
     const filePath = join(directory, "retry-studio-backup-1.zip");
     writeFileSync(filePath, "zip");

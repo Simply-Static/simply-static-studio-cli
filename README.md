@@ -54,7 +54,7 @@ static-studio sites get <siteId>
 static-studio sites basic-auth <siteId>
 static-studio sites magic-login <siteId>
 static-studio sites debug-log <siteId> --tail 200
-static-studio sites create --name Demo --subdomain demo123 --mount-path /blog
+static-studio sites create --name Demo --mount-path /blog
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
 static-studio sites push <siteId> full
 static-studio sites push <siteId> changes

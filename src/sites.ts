@@ -1,9 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { DEFAULT_TLD, SUPABASE_API_VERSION } from "./constants.js";
+import { SUPABASE_API_VERSION } from "./constants.js";
 import { CliError } from "./errors.js";
 import { invokeFunction } from "./supabase.js";
-import { randomAlpha, randomAlphanumeric, randomDomainWord } from "./random.js";
+import { randomDomainWord } from "./random.js";
 import type { SiteMetaRecord, SiteRecord } from "./types.js";
+import { uploadMigrationFile, type UploadMigrationOptions } from "./upload.js";
 import {
   assertSafeId,
   normalizeMountPath,
@@ -14,57 +15,37 @@ import {
 
 export interface CreateSiteOptions {
   name?: string;
-  subdomain?: string;
-  tld?: string;
-  url?: string;
-  /** @deprecated Studio derives the admin URL on the server. */
-  adminUrl?: string;
   email: string;
   userId: string;
   bedrock?: boolean;
-  hasMigration?: boolean;
   phpVersion?: string;
-  /** @deprecated Studio derives account ownership from the authenticated user. */
-  ownerAccountId?: string | null;
   mountPath?: string;
 }
 
-const MANAGED_SITE_HOST_RE = /(?:\.onstatic\.studio|\.static\d*\.studio)$/;
-const MANAGED_SUBDOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export interface CreateSiteWithMigrationOptions extends CreateSiteOptions {
+  migrationFile: string;
+  allowAnyZipName?: boolean;
+  onUploadProgress?: UploadMigrationOptions["onProgress"];
+}
+
+export interface CreateSiteResult {
+  site: SiteRecord;
+  queue: unknown;
+  credentials: Record<string, string>;
+  provisioning?: {
+    identifier?: string;
+    managed_url?: string;
+    admin_url?: string;
+  };
+}
+
+type PreparedSiteProvisioning = {
+  name: string;
+  mountPath: string;
+  phpVersion: (typeof PHP_VERSIONS)[number];
+};
+
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"] as const;
-
-export function normalizeManagedSiteUrl(value: string): string {
-  let url: URL;
-  try {
-    url = new URL(String(value || "").trim());
-  } catch {
-    throw new CliError("Site URL must be a valid managed Studio HTTPS URL.");
-  }
-  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
-  if (
-    url.protocol !== "https:" ||
-    url.username ||
-    url.password ||
-    url.port ||
-    (url.pathname !== "/" && url.pathname !== "") ||
-    url.search ||
-    url.hash ||
-    !MANAGED_SITE_HOST_RE.test(hostname)
-  ) {
-    throw new CliError("New sites must use an HTTPS managed Studio hostname without a path, query, or credentials.");
-  }
-  return `https://${hostname}`;
-}
-
-function normalizeManagedSubdomain(value: string): string {
-  const subdomain = String(value || "").trim().toLowerCase();
-  if (!MANAGED_SUBDOMAIN_RE.test(subdomain)) {
-    throw new CliError(
-      "Site subdomain must be 1-63 lowercase letters, numbers, or hyphens and cannot start or end with a hyphen.",
-    );
-  }
-  return subdomain;
-}
 
 function normalizeSiteName(value: string | undefined): string {
   const name = String(value || randomDomainWord()).trim();
@@ -72,38 +53,6 @@ function normalizeSiteName(value: string | undefined): string {
     throw new CliError("Site name must be between 1 and 200 printable characters.");
   }
   return name;
-}
-
-export function generateSiteSeed(options: Partial<CreateSiteOptions> = {}): {
-  name: string;
-  subdomain: string;
-  tld: string;
-  url: string;
-  adminUrl: string;
-} {
-  const requestedUrl = options.url ? normalizeManagedSiteUrl(options.url) : undefined;
-  const requestedHost = requestedUrl ? new URL(requestedUrl).hostname : "";
-  const urlSubdomain = requestedHost.split(".")[0] || "";
-  const subdomain = normalizeManagedSubdomain(
-    options.subdomain || urlSubdomain || `${randomAlpha(2)}${randomAlphanumeric(13)}`,
-  );
-  if (urlSubdomain && subdomain !== urlSubdomain) {
-    throw new CliError("Site subdomain must match the hostname supplied with --url.");
-  }
-  const tld = requestedHost
-    ? requestedHost.split(".").slice(1).join(".")
-    : String(options.tld || DEFAULT_TLD).trim().toLowerCase();
-  const url = requestedUrl || normalizeManagedSiteUrl(`https://${subdomain}.${tld}`);
-  const hostname = new URL(url).hostname;
-  const wpHostname = hostname.endsWith(".onstatic.studio") ? `wp-${hostname}` : `wp.${hostname}`;
-  const adminUrl = `https://${wpHostname}/wp-admin`;
-  return {
-    name: normalizeSiteName(options.name),
-    subdomain,
-    tld,
-    url,
-    adminUrl,
-  };
 }
 
 export async function listSites(
@@ -284,27 +233,75 @@ export async function getMagicLoginLink(
 export async function createSite(
   supabase: SupabaseClient,
   options: CreateSiteOptions,
-): Promise<{ site: SiteRecord; queue: unknown; credentials: Record<string, string> }> {
-  const seed = generateSiteSeed(options);
-  const mountPath = normalizeMountPath(options.mountPath);
-  const phpVersion = requireAllowedValue(
-    String(options.phpVersion || "8.3"),
-    PHP_VERSIONS,
-    "PHP version",
-  );
+): Promise<CreateSiteResult> {
+  return provisionSite(supabase, options, prepareSiteProvisioning(options), false);
+}
 
-  const recordResult = await invokeFunction<{ site: SiteRecord }>(supabase, "create-site-record", {
-    url: seed.url,
-    name: seed.name,
+export async function createSiteWithMigration(
+  supabase: SupabaseClient,
+  options: CreateSiteWithMigrationOptions,
+): Promise<CreateSiteResult & {
+  upload: Omit<Awaited<ReturnType<typeof uploadMigrationFile>>, "migrationToken" | "siteIdentifier">;
+}> {
+  const prepared = prepareSiteProvisioning(options);
+  const upload = await uploadMigrationFile(supabase, {
+    filePath: options.migrationFile,
+    newSite: true,
+    ...(options.allowAnyZipName === undefined
+      ? {}
+      : { allowAnyZipName: options.allowAnyZipName }),
+    ...(options.onUploadProgress ? { onProgress: options.onUploadProgress } : {}),
+  });
+  if (!upload.migrationToken) {
+    throw new CliError("Migration upload did not return a signed site creation token.");
+  }
+  const result = await provisionSite(
+    supabase,
+    options,
+    prepared,
+    true,
+    upload.migrationToken,
+  );
+  const { migrationToken: _migrationToken, siteIdentifier: _siteIdentifier, ...publicUpload } = upload;
+  return { ...result, upload: publicUpload };
+}
+
+function prepareSiteProvisioning(options: CreateSiteOptions): PreparedSiteProvisioning {
+  return {
+    name: normalizeSiteName(options.name),
+    mountPath: normalizeMountPath(options.mountPath),
+    phpVersion: requireAllowedValue(
+      String(options.phpVersion || "8.3"),
+      PHP_VERSIONS,
+      "PHP version",
+    ),
+  };
+}
+
+async function provisionSite(
+  supabase: SupabaseClient,
+  options: CreateSiteOptions,
+  prepared: PreparedSiteProvisioning,
+  hasMigration: boolean,
+  migrationToken?: string,
+): Promise<CreateSiteResult> {
+  const { name, mountPath, phpVersion } = prepared;
+
+  const recordResult = await invokeFunction<{
+    site: SiteRecord;
+    provisioning?: CreateSiteResult["provisioning"];
+  }>(supabase, "create-site-record", {
+    name,
     ...(options.bedrock ? { bedrock: true } : {}),
     email: options.email,
     user_id: options.userId,
     mount_path: mountPath,
+    ...(migrationToken ? { migration_token: migrationToken } : {}),
   });
 
   const siteId = String(recordResult.site.id);
   const queue = await invokeFunction(supabase, "queue-site", {
-    siteHasMigration: Boolean(options.hasMigration),
+    siteHasMigration: hasMigration,
     site_id: siteId,
     apiVersion: SUPABASE_API_VERSION,
     phpVersion,
@@ -314,6 +311,7 @@ export async function createSite(
   return {
     site: recordResult.site,
     queue,
+    ...(recordResult.provisioning ? { provisioning: recordResult.provisioning } : {}),
     credentials: {
       username: requiredCredential(meta.username, "username"),
       password: requiredCredential(meta.password, "password"),

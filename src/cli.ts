@@ -80,8 +80,8 @@ import {
 import {
   clearCache,
   createSite,
+  createSiteWithMigration,
   deleteSite,
-  generateSiteSeed,
   getBasicAuthCredentials,
   getChangesCount,
   getMagicLoginLink,
@@ -351,9 +351,6 @@ sites
   .command("create")
   .description("create and queue a new Static Studio site")
   .option("--name <name>", "site display name")
-  .option("--subdomain <subdomain>", "system-domain subdomain")
-  .option("--tld <tld>", "system-domain TLD", "onstatic.studio")
-  .option("--url <url>", "managed Studio site URL")
   .option("--mount-path <path>", "serve the static site below this URL path")
   .option("--bedrock", "create a Bedrock WordPress site")
   .option("--php-version <version>", "PHP version", "8.3")
@@ -367,40 +364,33 @@ sites
         "PHP version",
       );
       const mountPath = normalizeMountPath(opts.mountPath);
-      const seed = generateSiteSeed({
+      const createOptions = {
         name: opts.name,
-        subdomain: opts.subdomain,
-        tld: opts.tld,
-        url: opts.url,
-      });
-
-      let upload: unknown = null;
-      if (opts.migrationFile) {
-        process.stderr.write(`Uploading migration file to ${seed.subdomain}...\n`);
-        upload = await uploadMigrationFile(supabase, {
-          filePath: opts.migrationFile,
-          subdomain: seed.subdomain,
-          allowAnyZipName: Boolean(opts.allowAnyZipName),
-          onProgress: ({ loaded, total }) => {
-            if (!process.stderr.isTTY || !total) return;
-            const pct = Math.min(100, Math.round((loaded / total) * 100));
-            process.stderr.write(`\rUpload ${pct}%`);
-          },
-        });
-        if (process.stderr.isTTY) process.stderr.write("\n");
-      }
-
-      const result = await createSite(supabase, {
-        ...seed,
         email: user.email || "",
         userId: user.id,
         bedrock: Boolean(opts.bedrock),
-        hasMigration: Boolean(opts.migrationFile),
         phpVersion,
         mountPath,
-      });
+      };
 
-      print(cmd, { ...result, upload });
+      if (!opts.migrationFile) {
+        print(cmd, await createSite(supabase, createOptions));
+        return;
+      }
+
+      process.stderr.write("Uploading migration file...\n");
+      const result = await createSiteWithMigration(supabase, {
+        ...createOptions,
+        migrationFile: opts.migrationFile,
+        allowAnyZipName: Boolean(opts.allowAnyZipName),
+        onUploadProgress: ({ loaded, total }) => {
+          if (!process.stderr.isTTY || !total) return;
+          const pct = Math.min(100, Math.round((loaded / total) * 100));
+          process.stderr.write(`\rUpload ${pct}%`);
+        },
+      });
+      if (process.stderr.isTTY) process.stderr.write("\n");
+      print(cmd, result);
     });
   });
 

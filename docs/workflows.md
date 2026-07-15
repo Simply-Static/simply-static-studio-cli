@@ -35,13 +35,11 @@ Create a generated site:
 static-studio sites create --name "Demo"
 ```
 
-Create a specific system-domain site:
+Create a site with custom runtime settings:
 
 ```bash
 static-studio sites create \
   --name "Demo" \
-  --subdomain demo123 \
-  --tld onstatic.studio \
   --mount-path /blog \
   --php-version 8.3
 ```
@@ -51,11 +49,10 @@ Create from a migration archive:
 ```bash
 static-studio sites create \
   --name "Imported Site" \
-  --subdomain imported-site \
   --migration-file ./studio-backup-imported-site.zip
 ```
 
-New sites must use a managed Studio URL. Add a custom domain after provisioning. The create response includes the site record, queue result, server-generated WordPress and Basic Auth credentials, and optional upload metadata. Migration files use presigned multipart upload in 25 MiB parts and may be up to 10 GB.
+Studio generates an opaque, immutable identity for each new site. That identity is shared by the managed static hostname and the provisioning resources, and is never derived from the editable site name. Add a custom domain after provisioning; the managed hostname remains connected as the fallback. The create response includes the site record, queue result, server-generated WordPress and Basic Auth credentials, and optional upload metadata. Migration files use presigned multipart upload in 25 MiB parts and may be up to 10 GB.
 
 ## Operate a Site
 

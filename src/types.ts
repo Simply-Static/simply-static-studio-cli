@@ -34,6 +34,8 @@ export interface AuthContext {
 export interface SiteRecord {
   id: string | number;
   url?: string;
+  managed_url?: string | null;
+  provisioning_id?: string | null;
   name?: string;
   status?: string;
   notes?: string | null;

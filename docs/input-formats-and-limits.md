@@ -72,7 +72,7 @@ Report features require the applicable Lagos Agency entitlements.
 
 ## Site Creation and Mount Paths
 
-New sites must use an HTTPS managed Studio hostname. `--subdomain` and `--tld` derive that URL; `--url` may only provide an equivalent managed Studio URL. Connect custom domains after creation. The platform derives the WordPress admin URL and generates all WordPress, Basic Auth, and secret credentials server-side, so `--admin-url` is no longer accepted.
+The site name is mutable display metadata. It is never used as the managed hostname, WordPress hostname, CDN resource name, or server account name. Static Studio generates and signs a separate opaque identifier during provisioning; callers cannot supply `--subdomain`, `--tld`, `--url`, or `--admin-url`. Connect custom domains after creation. The original managed hostname stays connected as an immutable fallback.
 
 Supported `--php-version` values are `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, and `8.4`.
 
@@ -95,11 +95,11 @@ Accepted archive extensions:
 
 ZIP files must include `studio-backup-` in the filename unless `--allow-any-zip-name` is supplied. The maximum upload size is 10 GB.
 
-Uploads are stored in the `site_migrations` bucket with a key derived from the site subdomain:
+Uploads are stored in the `site_migrations` bucket with a key derived from the generated opaque site identifier:
 
 ```text
-public/site-migration-<subdomain>.zip
-public/site-migration-<subdomain>.tar.gz
+public/site-migration-<site-identifier>.zip
+public/site-migration-<site-identifier>.tar.gz
 ```
 
 The CLI initializes a presigned multipart upload through Static Studio. It reads and uploads 25 MiB parts with two concurrent workers, requests signed URLs in batches of 10, retries a failed part up to five times, and completes the upload with the returned ETags. An interrupted upload is aborted when possible. Raw storage credentials are never returned to the CLI. Upload metadata is included in the command result.

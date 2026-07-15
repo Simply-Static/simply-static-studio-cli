@@ -32,7 +32,8 @@ type CompletedPart = {
 
 export interface UploadMigrationOptions {
   filePath: string;
-  subdomain: string;
+  subdomain?: string;
+  newSite?: boolean;
   allowAnyZipName?: boolean;
   onProgress?: (progress: { loaded: number; total?: number }) => void;
 }
@@ -241,10 +242,16 @@ async function uploadSignedBatch(
 export async function uploadMigrationFile(
   supabase: SupabaseClient,
   options: UploadMigrationOptions,
-): Promise<{ bucket: string; key: string; size: number }> {
+): Promise<{
+  bucket: string;
+  key: string;
+  size: number;
+  migrationToken?: string;
+  siteIdentifier?: string;
+}> {
   const object = getMigrationObjectInfo(
     options.filePath,
-    options.subdomain,
+    options.newSite ? "pending" : String(options.subdomain || ""),
     options.allowAnyZipName,
   );
   const partCount = Math.ceil(object.size / DEFAULT_PART_SIZE);
@@ -261,6 +268,8 @@ export async function uploadMigrationFile(
     const initialized = await invokeUploadAction<{
       token?: unknown;
       partCount?: unknown;
+      key?: unknown;
+      siteIdentifier?: unknown;
     }>(supabase, {
       action: "init",
       bucket: object.bucket,
@@ -268,6 +277,7 @@ export async function uploadMigrationFile(
       contentType: object.contentType,
       fileSize: object.size,
       partSize: DEFAULT_PART_SIZE,
+      ...(options.newSite ? { purpose: "new_site" } : {}),
     });
 
     if (typeof initialized?.token === "string" && initialized.token) {
@@ -275,6 +285,16 @@ export async function uploadMigrationFile(
     }
     if (!uploadToken || Number(initialized.partCount) !== partCount) {
       throw new CliError("Could not initialize multipart migration upload.");
+    }
+    const resolvedKey = typeof initialized.key === "string" ? initialized.key : object.key;
+    if (!/^public\/site-migration-[a-z0-9][a-z0-9-]{0,62}\.(?:zip|tar\.gz)$/.test(resolvedKey)) {
+      throw new CliError("Upload service returned an invalid migration object key.");
+    }
+    const siteIdentifier = typeof initialized.siteIdentifier === "string"
+      ? initialized.siteIdentifier
+      : undefined;
+    if (options.newSite && !/^[a-z]{2}[a-z0-9]{13}$/.test(siteIdentifier || "")) {
+      throw new CliError("Upload service did not return a valid site identifier.");
     }
 
     const completedParts: CompletedPart[] = [];
@@ -304,7 +324,12 @@ export async function uploadMigrationFile(
     }
 
     completedParts.sort((a, b) => a.partNumber - b.partNumber);
-    const completed = await invokeUploadAction<{ ok?: unknown }>(supabase, {
+    const completed = await invokeUploadAction<{
+      ok?: unknown;
+      key?: unknown;
+      migrationToken?: unknown;
+      siteIdentifier?: unknown;
+    }>(supabase, {
       action: "complete",
       token: uploadToken,
       parts: completedParts,
@@ -312,11 +337,23 @@ export async function uploadMigrationFile(
     if (completed?.ok !== true) {
       throw new CliError("Storage did not confirm the completed migration upload.");
     }
+    const completedKey = typeof completed.key === "string" ? completed.key : resolvedKey;
+    if (completedKey !== resolvedKey) {
+      throw new CliError("Upload service returned inconsistent migration object keys.");
+    }
+    const migrationToken = typeof completed.migrationToken === "string"
+      ? completed.migrationToken
+      : undefined;
+    if (options.newSite && !migrationToken) {
+      throw new CliError("Upload service did not return a signed site creation token.");
+    }
 
     return {
       bucket: object.bucket,
-      key: object.key,
+      key: completedKey,
       size: object.size,
+      ...(migrationToken ? { migrationToken } : {}),
+      ...(siteIdentifier ? { siteIdentifier } : {}),
     };
   } catch (error) {
     if (uploadToken) {
