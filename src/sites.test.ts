@@ -1,60 +1,19 @@
-import { describe, expect, it } from "vitest";
-import { DEFAULT_TLD } from "./constants.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { CliError } from "./errors.js";
 import {
   basicAuthCredentialsFromMeta,
   clearCache,
   createSite,
-  generateSiteSeed,
+  createSiteWithMigration,
   getMagicLoginLink,
   listSites,
-  normalizeManagedSiteUrl,
   siteSummaryRows,
   sitePushModeToExportType,
 } from "./sites.js";
 import { createSupabaseMock } from "./test-utils.js";
-
-describe("generateSiteSeed", () => {
-  it("derives default URLs from the subdomain and TLD", () => {
-    const seed = generateSiteSeed({
-      name: "Example",
-      subdomain: "demo",
-      tld: DEFAULT_TLD,
-    });
-
-    expect(seed).toEqual({
-      name: "Example",
-      subdomain: "demo",
-      tld: "onstatic.studio",
-      url: "https://demo.onstatic.studio",
-      adminUrl: "https://wp-demo.onstatic.studio/wp-admin",
-    });
-  });
-
-  it("derives upload routing and the admin URL from explicit managed URLs", () => {
-    const seed = generateSiteSeed({
-      name: "Example",
-      url: "https://custom.static1.studio",
-      adminUrl: "https://ignored.example/wp-admin",
-    });
-
-    expect(seed).toMatchObject({
-      subdomain: "custom",
-      tld: "static1.studio",
-      url: "https://custom.static1.studio",
-      adminUrl: "https://wp.custom.static1.studio/wp-admin",
-    });
-  });
-
-  it("rejects custom hosts and mismatched upload subdomains before provisioning", () => {
-    expect(() => normalizeManagedSiteUrl("https://example.com")).toThrow("managed Studio");
-    expect(() => generateSiteSeed({
-      subdomain: "other",
-      url: "https://demo.onstatic.studio",
-    })).toThrow("must match");
-    expect(() => generateSiteSeed({ name: " ".repeat(201) })).toThrow("Site name");
-  });
-});
 
 describe("sitePushModeToExportType", () => {
   it("maps full pushes to backend exports", () => {
@@ -179,20 +138,25 @@ describe("createSite", () => {
     const { supabase, functionCalls } = createSupabaseMock(
       { site_meta: { data: serverCredentials, error: null } },
       (name) => name === "create-site-record"
-        ? { site: { id: "42", name: "Example", url: "https://demo.onstatic.studio" } }
+        ? {
+          site: { id: "42", name: "Example", url: "https://ab1234567890123.onstatic.studio" },
+          provisioning: {
+            identifier: "ab1234567890123",
+            managed_url: "https://ab1234567890123.onstatic.studio",
+          },
+        }
         : { message: "Site queued" },
     );
 
     await expect(createSite(supabase, {
       name: "Example",
-      subdomain: "demo",
       email: "person@example.com",
       userId: "user-1",
       mountPath: " /blog/ ",
-      hasMigration: true,
       phpVersion: "8.4",
     })).resolves.toMatchObject({
       site: { id: "42" },
+      provisioning: { identifier: "ab1234567890123" },
       credentials: {
         username: "server-user",
         password: "server-password",
@@ -203,27 +167,93 @@ describe("createSite", () => {
       },
     });
 
-    expect(functionCalls).toEqual([
-      {
-        name: "create-site-record",
-        body: {
-          url: "https://demo.onstatic.studio",
-          name: "Example",
-          email: "person@example.com",
-          user_id: "user-1",
-          mount_path: "/blog",
-        },
+    expect(functionCalls[0]).toEqual({
+      name: "create-site-record",
+      body: {
+        name: "Example",
+        email: "person@example.com",
+        user_id: "user-1",
+        mount_path: "/blog",
       },
-      {
-        name: "queue-site",
-        body: {
-          siteHasMigration: true,
-          site_id: "42",
-          apiVersion: 2,
-          phpVersion: "8.4",
-        },
+    });
+    expect(functionCalls[1]).toEqual({
+      name: "queue-site",
+      body: {
+        siteHasMigration: false,
+        site_id: "42",
+        apiVersion: 2,
+        phpVersion: "8.4",
       },
-    ]);
+    });
+  });
+
+  it("uses the server-signed upload identity for migration provisioning", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "static-studio-site-"));
+    const migrationFile = join(directory, "studio-backup-site.zip");
+    writeFileSync(migrationFile, "zip");
+    vi.stubGlobal("fetch", async () =>
+      new Response(null, { status: 200, headers: { etag: "migration-etag" } })
+    );
+
+    try {
+      const { supabase, functionCalls } = createSupabaseMock(
+        { site_meta: { data: serverCredentials, error: null } },
+        (name, body) => {
+          if (name === "get-upload-credentials") {
+            const action = (body as { action?: string }).action;
+            if (action === "init") {
+              return {
+                token: "upload-token",
+                partCount: 1,
+                key: "public/site-migration-ab1234567890123.zip",
+                siteIdentifier: "ab1234567890123",
+              };
+            }
+            if (action === "sign_parts") {
+              return { urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }] };
+            }
+            if (action === "complete") {
+              return {
+                ok: true,
+                key: "public/site-migration-ab1234567890123.zip",
+                siteIdentifier: "ab1234567890123",
+                migrationToken: "signed-migration-token",
+              };
+            }
+          }
+          if (name === "create-site-record") {
+            return { site: { id: "42", name: "Imported Site" } };
+          }
+          return { message: "Site queued" };
+        },
+      );
+
+      await createSiteWithMigration(supabase, {
+        name: "Imported Site",
+        email: "person@example.com",
+        userId: "user-1",
+        migrationFile,
+      });
+
+      const init = functionCalls.find((call) =>
+        call.name === "get-upload-credentials" && (call.body as { action?: string }).action === "init"
+      );
+      const create = functionCalls.find((call) => call.name === "create-site-record");
+      const queue = functionCalls.find((call) => call.name === "queue-site");
+      expect(init?.body).toMatchObject({
+        key: "public/site-migration-pending.zip",
+        purpose: "new_site",
+      });
+      expect(create?.body).toMatchObject({
+        name: "Imported Site",
+        migration_token: "signed-migration-token",
+      });
+      expect(create?.body).not.toHaveProperty("url");
+      expect(queue?.body).toMatchObject({ siteHasMigration: true });
+    } finally {
+      vi.unstubAllGlobals();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("reports when the server-created credential record is incomplete", async () => {
@@ -237,7 +267,6 @@ describe("createSite", () => {
 
     await expect(createSite(supabase, {
       name: "Example",
-      subdomain: "demo",
       email: "person@example.com",
       userId: "user-1",
     })).rejects.toThrow("password was missing from its server-generated credentials");
@@ -248,7 +277,6 @@ describe("createSite", () => {
 
     await expect(createSite(supabase, {
       name: "Example",
-      subdomain: "demo",
       email: "person@example.com",
       userId: "user-1",
       phpVersion: "9.0",

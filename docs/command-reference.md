@@ -122,16 +122,13 @@ static-studio sites create [options]
 | Option | Default | Description |
 | --- | --- | --- |
 | `--name <name>` | generated | Site display name. |
-| `--subdomain <subdomain>` | generated | System-domain subdomain. |
-| `--tld <tld>` | `onstatic.studio` | System-domain TLD. |
-| `--url <url>` | derived | Managed Studio public URL. Custom domains are not accepted during creation. |
 | `--mount-path <path>` | none | Serve the static site below this public URL path, for example `/blog`. |
 | `--bedrock` | off | Create a Bedrock WordPress site. |
 | `--php-version <version>` | `8.3` | PHP version: `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, or `8.4`. |
 | `--migration-file <path>` | none | Upload a migration archive before queueing the site. |
 | `--allow-any-zip-name` | off | Skip Static Studio backup ZIP filename validation. |
 
-The public URL must be an HTTPS managed Studio hostname. Connect a custom domain after provisioning with `domains add` or `domains primary`. The former `--admin-url` option has been removed: the platform derives the admin URL and cryptographically generates the WordPress, Basic Auth, and secret credentials on the server. The command retrieves and prints those server-generated credentials.
+The site name is display metadata and can be changed later. The creation flow independently generates an opaque, immutable infrastructure identity for the managed static hostname, WordPress hostname, CDN resources, and server account. The managed hostname cannot be selected during creation or removed later. Connect a custom domain after provisioning with `domains add` or `domains primary`; the managed hostname remains connected as the fallback. The command retrieves and prints the server-generated WordPress, Basic Auth, and secret credentials.
 
 If `--migration-file` is supplied, the CLI uploads the file before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts and support archives up to 10 GB.
 

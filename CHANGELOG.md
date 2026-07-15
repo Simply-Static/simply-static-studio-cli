@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6 - 2026-07-15
+
+### Changed
+
+- Site names are now strictly display metadata. New managed hostnames use an opaque generated identifier, and `sites create` no longer accepts caller-controlled `--subdomain`, `--tld`, or `--url` values.
+- Migration uploads and site provisioning now share the same server-generated, signed identifier without exposing it as a creation option.
+
 ## 0.1.5 - 2026-07-12
 
 ### Added
