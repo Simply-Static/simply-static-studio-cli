@@ -54,7 +54,19 @@ import { getDebugLog } from "./logs.js";
 import { printValue } from "./output.js";
 import { getSiteStatistics, listPerformanceReports, runPerformanceTest } from "./performance.js";
 import { confirm } from "./prompt.js";
-import { deleteSshKey, getSshInfo, listBackups, queueBackup, queueSshKey } from "./queues.js";
+import {
+  copyPlatformBackup,
+  deleteSshKey,
+  getPlatformBackup,
+  getPlatformBackupDownload,
+  getPlatformBackupPolicy,
+  getSshInfo,
+  listBackups,
+  queueBackup,
+  queueSshKey,
+  retrySftpReconciliation,
+  updatePlatformBackupPolicy,
+} from "./queues.js";
 import {
   createReportShare,
   deleteReportSchedule,
@@ -85,6 +97,7 @@ import {
   getBasicAuthCredentials,
   getChangesCount,
   getMagicLoginLink,
+  getPlatformSiteLifecycle,
   getSite,
   getSiteMigrationSubdomain,
   listSites,
@@ -93,6 +106,8 @@ import {
   retryFailedDeployment,
   siteSummaryRows,
   updateSite,
+  updatePlatformRuntimePolicy,
+  updatePlatformSiteLifecycle,
 } from "./sites.js";
 import { getAuthContext, invokeFunction } from "./supabase.js";
 import { assignTagToSite, createTag, deleteTag, listSiteTags, listTags, removeTagFromSite, updateTag } from "./tags.js";
@@ -352,15 +367,20 @@ sites
   .description("create and queue a new Static Studio site")
   .option("--name <name>", "site display name")
   .option("--mount-path <path>", "serve the static site below this URL path")
-  .option("--bedrock", "create a Bedrock WordPress site")
   .option("--php-version <version>", "PHP version", "8.3")
   .option("--migration-file <path>", "upload a migration archive before queueing the site")
+  .option("--migration-artifact-id <id>", "resume creation from a finalized Docker migration artifact")
   .option("--allow-any-zip-name", "skip Static Studio backup ZIP filename check")
   .action(async (opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
+      if (opts.migrationFile && opts.migrationArtifactId) {
+        throw new CliError(
+          "Choose either --migration-file or --migration-artifact-id, not both.",
+        );
+      }
       const phpVersion = requireAllowedValue(
         String(opts.phpVersion || "8.3"),
-        ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"] as const,
+        ["8.2", "8.3", "8.4"] as const,
         "PHP version",
       );
       const mountPath = normalizeMountPath(opts.mountPath);
@@ -368,9 +388,11 @@ sites
         name: opts.name,
         email: user.email || "",
         userId: user.id,
-        bedrock: Boolean(opts.bedrock),
         phpVersion,
         mountPath,
+        ...(opts.migrationArtifactId
+          ? { migrationArtifactId: opts.migrationArtifactId }
+          : {}),
       };
 
       if (!opts.migrationFile) {
@@ -467,6 +489,46 @@ sites
   .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await retryFailedDeployment(supabase, siteId));
+    });
+  });
+
+sites
+  .command("runtime-status <siteId>")
+  .description("show Docker runtime state and recent lifecycle diagnostics")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getPlatformSiteLifecycle(supabase, siteId));
+    });
+  });
+
+for (const action of ["start", "stop"] as const) {
+  sites
+    .command(`${action} <siteId>`)
+    .description(`${action} a Docker WordPress runtime`)
+    .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+      await withAuth(cmd, async ({ supabase }) => {
+        print(cmd, await updatePlatformSiteLifecycle(supabase, siteId, action));
+      });
+    });
+}
+
+sites
+  .command("runtime-policy <siteId> <state>")
+  .description("set Docker WordPress runtime policy to always-on or timed")
+  .action(async (siteId: string, state: string, _localOpts: ParsedOptions, cmd: Command) => {
+    const normalized = String(state || "").trim().toLowerCase();
+    if (!["always-on", "timed"].includes(normalized)) {
+      throw new CliError("Runtime policy must be `always-on` or `timed`.");
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(
+        cmd,
+        await updatePlatformRuntimePolicy(
+          supabase,
+          siteId,
+          normalized === "always-on",
+        ),
+      );
     });
   });
 
@@ -1257,8 +1319,8 @@ for (const action of ["create", "sync"] as const) {
     .command(`${action} <siteId>`)
     .description(`${action === "create" ? "queue backup creation" : "queue backup sync"}`)
     .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
-      await withAuth(cmd, async ({ supabase }) => {
-        print(cmd, await queueBackup(supabase, action, siteId));
+      await withAuth(cmd, async ({ supabase, user }) => {
+        print(cmd, await queueBackup(supabase, action, siteId, { userId: user.id }));
       });
     });
 }
@@ -1269,12 +1331,98 @@ for (const action of ["restore", "delete"] as const) {
     .description(`queue backup ${action}`)
     .option("--backup-id <id>", "backup ID")
     .option("--date <date>", "backup date_string")
+    .option("-y, --yes", "skip confirmation")
     .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
-      await withAuth(cmd, async ({ supabase }) => {
-        print(cmd, await queueBackup(supabase, action, siteId, opts));
+      if (
+        !opts.yes &&
+        !(await confirm(
+          action === "restore"
+            ? `Restore backup ${opts.backupId || opts.date || ""} to site ${siteId}?`
+            : `Delete backup ${opts.backupId || opts.date || ""} from site ${siteId}?`,
+        ))
+      ) {
+        throw new CliError("Cancelled.", 0);
+      }
+      await withAuth(cmd, async ({ supabase, user }) => {
+        print(cmd, await queueBackup(supabase, action, siteId, {
+          ...opts,
+          userId: user.id,
+        }));
       });
     });
 }
+
+backups
+  .command("get <siteId> <backupId>")
+  .description("show Docker backup artifact status")
+  .action(async (siteId: string, backupId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await getPlatformBackup(supabase, siteId, backupId));
+    });
+  });
+
+backups
+  .command("download <siteId> <backupId>")
+  .description("create a short-lived Docker backup download URL")
+  .action(async (siteId: string, backupId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      const result = await getPlatformBackupDownload(supabase, siteId, backupId) as {
+        url?: string;
+      };
+      if (!result.url) {
+        throw new CliError("The platform did not return a backup download URL.");
+      }
+      print(cmd, globals(cmd).json ? result : result.url);
+    });
+  });
+
+backups
+  .command("copy <siteId> <backupId> <targetSiteId>")
+  .description("copy a ready Docker backup into another Docker site")
+  .option("-y, --yes", "skip confirmation")
+  .action(async (
+    siteId: string,
+    backupId: string,
+    targetSiteId: string,
+    opts: ParsedOptions,
+    cmd: Command,
+  ) => {
+    if (
+      !opts.yes &&
+      !(await confirm(`Replace Docker site ${targetSiteId} from backup ${backupId}?`))
+    ) {
+      throw new CliError("Cancelled.", 0);
+    }
+    await withAuth(cmd, async ({ supabase }) => {
+      print(
+        cmd,
+        await copyPlatformBackup(supabase, siteId, backupId, targetSiteId),
+      );
+    });
+  });
+
+backups
+  .command("policy <siteId> [cadence]")
+  .description("show or update Docker automated backup cadence")
+  .action(async (
+    siteId: string,
+    cadence: string | undefined,
+    _localOpts: ParsedOptions,
+    cmd: Command,
+  ) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      if (!cadence) {
+        print(cmd, await getPlatformBackupPolicy(supabase, siteId));
+        return;
+      }
+      const normalized = requireAllowedValue(
+        cadence,
+        ["daily", "weekly"] as const,
+        "Backup cadence",
+      );
+      print(cmd, await updatePlatformBackupPolicy(supabase, siteId, normalized));
+    });
+  });
 
 const redirects = program.command("redirects").description("manage CDN redirects");
 
@@ -1510,11 +1658,11 @@ team
 const ssh = program.command("ssh").description("manage SSH/SFTP keys");
 
 ssh
-  .command("list")
-  .description("list SSH keys and site associations")
-  .action(async (_localOpts: ParsedOptions, cmd: Command) => {
+  .command("list [siteId]")
+  .description("list SSH/SFTP keys, associations, and optional site connection state")
+  .action(async (siteId: string | undefined, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
-      print(cmd, await getSshInfo(supabase, user.id));
+      print(cmd, await getSshInfo(supabase, user.id, siteId));
     });
   });
 
@@ -1558,6 +1706,15 @@ ssh
   .action(async (keyId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase, user }) => {
       print(cmd, await deleteSshKey(supabase, user.id, keyId));
+    });
+  });
+
+ssh
+  .command("retry <siteId>")
+  .description("retry Docker SFTP account reconciliation")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase, user }) => {
+      print(cmd, await retrySftpReconciliation(supabase, siteId, user.id));
     });
   });
 

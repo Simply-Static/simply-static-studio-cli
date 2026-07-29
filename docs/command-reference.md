@@ -1,6 +1,6 @@
 # Command Reference
 
-All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`. This reference covers release `0.1.5`.
+All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`. This reference covers release `0.2.0`.
 
 ## Root Commands
 
@@ -56,7 +56,7 @@ static-studio sites list [--page <number>] [--page-size <number>] [--search <ter
 | `--sort <field>` | `created_at` | One of `id`, `name`, `url`, `status`, `created_at`, `updated_at`. |
 | `--asc` | off | Sort ascending instead of descending. |
 
-Non-JSON output shows summary rows with `id`, `name`, `url`, `status`, and `created_at`.
+Non-JSON output shows summary rows with `id`, `name`, `url`, `status`, `hosting_provider`, and `created_at`. Docker rows also include normalized desired/observed runtime state and their always-on policy.
 
 ### `sites get`
 
@@ -84,7 +84,7 @@ Generate a short-lived WordPress magic login link.
 static-studio sites magic-login <siteId> [--email <email>]
 ```
 
-Non-JSON output prints only the URL. JSON output includes `url`, `siteId`, `staticSiteId`, and `email`.
+Non-JSON output prints only the URL. JSON output includes `url`, the canonical `siteId`, and `email`.
 
 ### `sites debug-log`
 
@@ -123,14 +123,14 @@ static-studio sites create [options]
 | --- | --- | --- |
 | `--name <name>` | generated | Site display name. |
 | `--mount-path <path>` | none | Serve the static site below this public URL path, for example `/blog`. |
-| `--bedrock` | off | Create a Bedrock WordPress site. |
-| `--php-version <version>` | `8.3` | PHP version: `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, or `8.4`. |
+| `--php-version <version>` | `8.3` | Docker PHP version: `8.2`, `8.3`, or `8.4`. |
 | `--migration-file <path>` | none | Upload a migration archive before queueing the site. |
+| `--migration-artifact-id <id>` | none | Resume creation from a finalized private Docker migration artifact. |
 | `--allow-any-zip-name` | off | Skip Static Studio backup ZIP filename validation. |
 
-The site name is display metadata and can be changed later. The creation flow independently generates an opaque, immutable infrastructure identity for the managed static hostname, WordPress hostname, CDN resources, and server account. The managed hostname cannot be selected during creation or removed later. Connect a custom domain after provisioning with `domains add` or `domains primary`; the managed hostname remains connected as the fallback. The command retrieves and prints the server-generated WordPress, Basic Auth, and secret credentials.
+The site name is display metadata and can be changed later. The server assigns the exact `static-studio-docker` provider and independently generates an opaque, immutable infrastructure identity for the managed static hostname, WordPress hostname, CDN resources, and runtime. The managed hostname cannot be selected during creation or removed later. Connect a custom domain after provisioning with `domains add` or `domains primary`; the managed hostname remains connected as the fallback. The command prints approved Basic Auth/helper credentials but does not retrieve the WordPress administrator password. Use `sites magic-login` for WordPress access.
 
-If `--migration-file` is supplied, the CLI uploads the file before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts and support archives up to 10 GB.
+If `--migration-file` is supplied, the CLI creates a private version-3 Docker migration artifact before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts, direct signed storage completion, and server-side archive finalization. Archives may be up to 10 GB. If site creation is interrupted after finalization, reuse the reported artifact with `--migration-artifact-id`; it is mutually exclusive with `--migration-file`.
 
 ### `sites update`
 
@@ -170,12 +170,40 @@ Redeploy an existing site after uploading a replacement migration archive.
 static-studio sites redeploy <siteId> --migration-file <path> [--allow-any-zip-name]
 ```
 
+This legacy replacement flow is available only for existing SpinupWP sites. Docker sites must use managed backup restore or copy.
+
 ### `sites retry`
 
 Retry a failed deployment.
 
 ```bash
 static-studio sites retry <siteId>
+```
+
+### `sites runtime-status`
+
+Show normalized Docker runtime state, recent lifecycle jobs, and diagnostic events.
+
+```bash
+static-studio sites runtime-status <siteId>
+```
+
+### `sites start` / `sites stop`
+
+Queue an idempotent Docker WordPress runtime transition.
+
+```bash
+static-studio sites start <siteId>
+static-studio sites stop <siteId>
+```
+
+### `sites runtime-policy`
+
+Keep a Docker WordPress runtime always on or use timed editor sessions.
+
+```bash
+static-studio sites runtime-policy <siteId> always-on
+static-studio sites runtime-policy <siteId> timed
 ```
 
 ### `sites changes`
@@ -812,7 +840,7 @@ List cached backups.
 static-studio backups list <siteId> [--refresh]
 ```
 
-`--refresh` queues a backup sync before listing.
+`--refresh` queues a backup sync before listing for legacy SpinupWP sites. Docker artifacts are read directly and do not require synchronization.
 
 ### `backups create`
 
@@ -822,6 +850,8 @@ Queue backup creation.
 static-studio backups create <siteId>
 ```
 
+The CLI derives the provider from the stored site record. Docker requests use an idempotency UUID and the Docker artifact control plane.
+
 ### `backups sync`
 
 Queue backup sync.
@@ -830,21 +860,65 @@ Queue backup sync.
 static-studio backups sync <siteId>
 ```
 
+This command is only for legacy SpinupWP sites.
+
 ### `backups restore`
 
 Queue backup restore.
 
 ```bash
-static-studio backups restore <siteId> [--backup-id <id>] [--date <date>]
+static-studio backups restore <siteId> [--backup-id <id>] [--date <date>] [--yes]
 ```
+
+Docker restores require a ready backup UUID and leave WordPress stopped after completion. The command prompts unless `--yes` is supplied.
 
 ### `backups delete`
 
 Queue backup deletion.
 
 ```bash
-static-studio backups delete <siteId> [--backup-id <id>] [--date <date>]
+static-studio backups delete <siteId> [--backup-id <id>] [--date <date>] [--yes]
 ```
+
+The command prompts unless `--yes` is supplied.
+
+### `backups get`
+
+Show one Docker backup artifact's current status.
+
+```bash
+static-studio backups get <siteId> <backupId>
+```
+
+### `backups download`
+
+Create a short-lived HTTPS URL for a ready Docker backup.
+
+```bash
+static-studio backups download <siteId> <backupId>
+```
+
+### `backups copy`
+
+Replace another Docker site's WordPress content and database from a ready artifact.
+
+```bash
+static-studio backups copy <siteId> <backupId> <targetSiteId> [--yes]
+```
+
+The authenticated user must administer both sites. The command prompts unless `--yes` is supplied.
+
+### `backups policy`
+
+Show or update the Docker scheduled-backup policy.
+
+```bash
+static-studio backups policy <siteId>
+static-studio backups policy <siteId> daily
+static-studio backups policy <siteId> weekly
+```
+
+The platform retains the three most recent scheduled artifacts. Manual and pre-restore safety artifacts are independent.
 
 ## Redirects
 
@@ -1040,10 +1114,10 @@ Prompts for confirmation unless `--yes` is supplied. If `--email` is omitted, th
 
 ### `ssh list`
 
-List SSH keys and site associations.
+List SSH/SFTP keys and site associations. Supplying a site ID also returns the provider-bound connection snapshot, including Docker SFTP availability, desired/applied key counts, host, username, and host-key fingerprint.
 
 ```bash
-static-studio ssh list
+static-studio ssh list [siteId]
 ```
 
 ### `ssh add`
@@ -1082,4 +1156,12 @@ Soft-delete a saved SSH key.
 
 ```bash
 static-studio ssh delete <keyId>
+```
+
+### `ssh retry`
+
+Retry Docker SFTP account reconciliation after a failed or pending setup.
+
+```bash
+static-studio ssh retry <siteId>
 ```

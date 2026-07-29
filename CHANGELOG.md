@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 - 2026-07-29
+
+### Added
+
+- Docker WordPress runtime status, start/stop, and always-on/timed policy commands.
+- Docker backup artifact status, secure downloads, cross-site copies, and automated daily/weekly policy management.
+- Provider-bound SFTP connection snapshots and reconciliation retries.
+- Resumable site creation from finalized private Docker migration artifacts.
+
+### Changed
+
+- New empty and imported sites now require the server-assigned `static-studio-docker` provider and queue Docker platform provisioning API v1.
+- New-site imports use private version-3 Docker migration artifacts, direct signed multipart completion, server-side finalization, and artifact-bound provisioning.
+- New Docker sites support PHP 8.2, 8.3, and 8.4. Bedrock creation is no longer exposed.
+- Site reads omit server-only infrastructure fields and the WordPress administrator password. WordPress access uses magic links; approved Basic Auth and helper credentials remain available through their dedicated commands.
+- Backup and SSH/SFTP operations derive behavior from each site's stored provider while preserving legacy SpinupWP workflows for existing sites.
+- Replacement migration uploads remain available only for legacy SpinupWP sites; Docker sites use managed backup restore/copy workflows.
+
 ## 0.1.6 - 2026-07-15
 
 ### Changed

@@ -6,11 +6,27 @@ import {
 
 export class CliError extends Error {
   exitCode: number;
+  status?: number;
+  code?: string;
+  deliveryAmbiguous?: boolean;
 
-  constructor(message: string, exitCode = 1) {
+  constructor(
+    message: string,
+    exitCode = 1,
+    metadata: {
+      status?: number;
+      code?: string;
+      deliveryAmbiguous?: boolean;
+    } = {},
+  ) {
     super(message);
     this.name = "CliError";
     this.exitCode = exitCode;
+    if (metadata.status !== undefined) this.status = metadata.status;
+    if (metadata.code !== undefined) this.code = metadata.code;
+    if (metadata.deliveryAmbiguous !== undefined) {
+      this.deliveryAmbiguous = metadata.deliveryAmbiguous;
+    }
   }
 }
 
@@ -43,6 +59,7 @@ export async function resolveFunctionError(error: unknown): Promise<Error> {
     const context = error.context as Response;
     try {
       const payload = (await context.clone().json()) as {
+        code?: unknown;
         error?: unknown;
         message?: unknown;
         details?: unknown;
@@ -52,19 +69,33 @@ export async function resolveFunctionError(error: unknown): Promise<Error> {
         payload?.message ||
         payload?.details ||
         `${context.status} ${context.statusText}`;
-      return new Error(String(message));
+      return new CliError(String(message), 1, {
+        status: context.status,
+        ...(typeof payload?.code === "string" ? { code: payload.code } : {}),
+        deliveryAmbiguous: context.status >= 500,
+      });
     } catch {
       try {
         const text = await context.clone().text();
-        return new Error(text || `${context.status} ${context.statusText}`);
+        return new CliError(
+          text || `${context.status} ${context.statusText}`,
+          1,
+          {
+            status: context.status,
+            deliveryAmbiguous: context.status >= 500,
+          },
+        );
       } catch {
-        return new Error(`${context.status} ${context.statusText}`);
+        return new CliError(`${context.status} ${context.statusText}`, 1, {
+          status: context.status,
+          deliveryAmbiguous: context.status >= 500,
+        });
       }
     }
   }
 
   if (error instanceof FunctionsRelayError || error instanceof FunctionsFetchError) {
-    return new Error(error.message);
+    return new CliError(error.message, 1, { deliveryAmbiguous: true });
   }
 
   if (error instanceof Error) {

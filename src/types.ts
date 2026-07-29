@@ -46,6 +46,18 @@ export interface SiteRecord {
   site_id?: string | number | null;
   mount_path?: string | null;
   bedrock?: boolean | null;
+  hosting_provider?: string | null;
+  php_version?: string | null;
+  is_migrating?: boolean | null;
+  is_docker_migrating?: boolean | null;
+  platform?: PlatformSiteState | PlatformSiteState[] | null;
+  [key: string]: unknown;
+}
+
+export interface PlatformSiteState {
+  desired_state?: string | null;
+  observed_state?: string | null;
+  always_on?: boolean | null;
   [key: string]: unknown;
 }
 

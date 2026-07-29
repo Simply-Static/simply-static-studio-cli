@@ -2,7 +2,7 @@
 
 This directory contains the detailed reference for the `static-studio` command line interface.
 
-These pages document release `0.1.5`.
+These pages document release `0.2.0`.
 
 ## Documents
 

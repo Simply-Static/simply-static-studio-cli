@@ -52,7 +52,15 @@ static-studio sites create \
   --migration-file ./studio-backup-imported-site.zip
 ```
 
-Studio generates an opaque, immutable identity for each new site. That identity is shared by the managed static hostname and the provisioning resources, and is never derived from the editable site name. Add a custom domain after provisioning; the managed hostname remains connected as the fallback. The create response includes the site record, queue result, server-generated WordPress and Basic Auth credentials, and optional upload metadata. Migration files use presigned multipart upload in 25 MiB parts and may be up to 10 GB.
+If the upload finalized but site creation could not be confirmed, first check `sites list`, then reuse the reported artifact without uploading again:
+
+```bash
+static-studio sites create \
+  --name "Imported Site" \
+  --migration-artifact-id <artifact-id>
+```
+
+Studio assigns the Docker provider and generates an opaque, immutable identity for each new site. That identity is shared by the managed static hostname and provisioning resources, and is never derived from the editable site name. Add a custom domain after provisioning; the managed hostname remains connected as the fallback. The create response includes the site record, Docker queue result, approved Basic Auth/helper credentials, and optional private artifact metadata. Use `sites magic-login` instead of a WordPress administrator password. Migration files use private multipart upload in 25 MiB parts, direct signed completion, and server-side finalization, and may be up to 10 GB.
 
 ## Operate a Site
 
@@ -83,11 +91,23 @@ static-studio sites migration-log <siteId>
 static-studio sites delete <siteId> --yes
 ```
 
+Control the Docker WordPress runtime:
+
+```bash
+static-studio sites runtime-status <siteId>
+static-studio sites start <siteId>
+static-studio sites stop <siteId>
+static-studio sites runtime-policy <siteId> always-on
+static-studio sites runtime-policy <siteId> timed
+```
+
 Redeploy from a replacement migration archive:
 
 ```bash
 static-studio sites redeploy <siteId> --migration-file ./studio-backup-site.zip
 ```
+
+Replacement migration uploads are a legacy SpinupWP workflow. For Docker sites, restore or copy a managed Docker backup.
 
 Inspect releases and roll back the static site:
 
@@ -124,14 +144,21 @@ The legacy SSL syntax remains available as `static-studio domains issue-ssl exam
 ## Backups
 
 ```bash
-static-studio backups list <siteId> --refresh
+static-studio backups list <siteId>
 static-studio backups create <siteId>
-static-studio backups sync <siteId>
-static-studio backups restore <siteId> --backup-id <backupId>
-static-studio backups delete <siteId> --date 2026-06-14
+static-studio backups get <siteId> <backupId>
+static-studio backups restore <siteId> --backup-id <backupId> --yes
+static-studio backups download <siteId> <backupId>
+static-studio backups policy <siteId> daily
 ```
 
-Restore and delete accept either `--backup-id` or `--date`.
+Docker backup artifacts use UUIDs and are read directly. To copy a ready artifact into another Docker site:
+
+```bash
+static-studio backups copy <siteId> <backupId> <targetSiteId> --yes
+```
+
+For existing SpinupWP sites, `backups sync`, `--refresh`, and date-based restore/delete remain available.
 
 ## Redirects
 
@@ -379,11 +406,12 @@ static-studio tags delete <tagId> --yes
 ## SSH/SFTP Keys
 
 ```bash
-static-studio ssh list
+static-studio ssh list <siteId>
 static-studio ssh add <siteId> --key-file ~/.ssh/id_ed25519.pub
 static-studio ssh connect <siteId> <keyId>
 static-studio ssh disconnect <siteId> <keyId>
 static-studio ssh delete <keyId>
+static-studio ssh retry <siteId>
 ```
 
-`ssh add` queues both key creation and attachment to the target site.
+`ssh add` queues both key creation and attachment to the target site. Supplying a site ID to `ssh list` returns the provider-bound SSH/SFTP connection snapshot.

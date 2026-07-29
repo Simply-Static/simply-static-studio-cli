@@ -74,7 +74,7 @@ Report features require the applicable Lagos Agency entitlements.
 
 The site name is mutable display metadata. It is never used as the managed hostname, WordPress hostname, CDN resource name, or server account name. Static Studio generates and signs a separate opaque identifier during provisioning; callers cannot supply `--subdomain`, `--tld`, `--url`, or `--admin-url`. Connect custom domains after creation. The original managed hostname stays connected as an immutable fallback.
 
-Supported `--php-version` values are `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, and `8.4`.
+New sites use the server-assigned Docker provider. Supported `--php-version` values are `8.2`, `8.3`, and `8.4`. Bedrock creation is not supported by the Docker platform.
 
 `sites create --mount-path` and `domains mount` normalize `/` to no mount path. Other values must be safe URL paths such as `/blog` without `..`, a query, or a fragment.
 
@@ -84,6 +84,7 @@ Migration uploads are accepted by:
 
 ```bash
 static-studio sites create --migration-file <path>
+static-studio sites create --migration-artifact-id <artifact-id>
 static-studio sites redeploy <siteId> --migration-file <path>
 ```
 
@@ -95,14 +96,18 @@ Accepted archive extensions:
 
 ZIP files must include `studio-backup-` in the filename unless `--allow-any-zip-name` is supplied. The maximum upload size is 10 GB.
 
-Uploads are stored in the `site_migrations` bucket with a key derived from the generated opaque site identifier:
+New-site uploads are stored privately in the `platform_migrations` bucket with server-generated provisioning and artifact IDs:
 
 ```text
-public/site-migration-<site-identifier>.zip
-public/site-migration-<site-identifier>.tar.gz
+private/platform-migrations/<site-identifier>/<artifact-id>/source.zip
+private/platform-migrations/<site-identifier>/<artifact-id>/source.tar.gz
 ```
 
-The CLI initializes a presigned multipart upload through Static Studio. It reads and uploads 25 MiB parts with two concurrent workers, requests signed URLs in batches of 10, retries a failed part up to five times, and completes the upload with the returned ETags. An interrupted upload is aborted when possible. Raw storage credentials are never returned to the CLI. Upload metadata is included in the command result.
+The CLI initializes private upload protocol v3 through Static Studio. It reads and uploads 25 MiB parts with two concurrent workers, requests signed URLs in batches of 10, and retries a failed part up to five times. Static Studio returns a narrowly signed storage-completion request; the CLI dispatches it directly, confirms the committed object with Static Studio, and waits for the external finalizer to validate the artifact before site creation. An upload is aborted when failure is known to occur before completion; a potentially committed artifact is preserved for safe server-side recovery. Raw storage credentials are never returned to the CLI.
+
+A finalized new-site artifact can be reused with `--migration-artifact-id` when the subsequent site-creation request was interrupted. The ID must be a canonical UUID, and it cannot be combined with `--migration-file`.
+
+Replacement uploads for existing SpinupWP sites keep the legacy public `site_migrations` flow. Replacement uploads are rejected for Docker sites before any file transfer starts.
 
 ## SEO Files
 
@@ -254,6 +259,9 @@ The following commands prompt unless `--yes` is supplied:
 - `sites delete`
 - `sites cancel-export`
 - `sites rollback`
+- `backups restore`
+- `backups delete`
+- `backups copy`
 - `domains transfer`
 - `seo delete`
 - `reports revoke-share`

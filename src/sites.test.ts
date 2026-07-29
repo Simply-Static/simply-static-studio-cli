@@ -9,9 +9,12 @@ import {
   createSite,
   createSiteWithMigration,
   getMagicLoginLink,
+  getPlatformSiteLifecycle,
   listSites,
   siteSummaryRows,
   sitePushModeToExportType,
+  updatePlatformRuntimePolicy,
+  updatePlatformSiteLifecycle,
 } from "./sites.js";
 import { createSupabaseMock } from "./test-utils.js";
 
@@ -55,14 +58,8 @@ describe("basicAuthCredentialsFromMeta", () => {
 });
 
 describe("getMagicLoginLink", () => {
-  it("calls the dashboard magic-link function and strips embedded URL credentials", async () => {
+  it("uses the canonical site ID and strips embedded URL credentials", async () => {
     const { supabase, functionCalls } = createSupabaseMock((table) => {
-      if (table === "site") {
-        return {
-          data: { id: "site-1", static_site_record_id: "static-1" },
-          error: null,
-        };
-      }
       if (table === "site_meta") {
         return {
           data: { site_id: "site-1", email: "person@example.com" },
@@ -75,7 +72,6 @@ describe("getMagicLoginLink", () => {
     await expect(getMagicLoginLink(supabase, "site-1", "person@example.com")).resolves.toEqual({
       url: "https://wp.example.test/wp-admin/?token=abc",
       siteId: "site-1",
-      staticSiteId: "static-1",
       email: "person@example.com",
     });
 
@@ -84,42 +80,12 @@ describe("getMagicLoginLink", () => {
         name: "get-magic-link",
         body: {
           siteId: "site-1",
-          staticSiteId: "static-1",
           email: "person@example.com",
         },
       },
     ]);
   });
 
-  it("uses the canonical static_site_record_id when a legacy alias also exists", async () => {
-    const { supabase, functionCalls } = createSupabaseMock((table) => {
-      if (table === "site") {
-        return {
-          data: {
-            id: "site-1",
-            static_site_id: "legacy-static-id",
-            static_site_record_id: "canonical-static-id",
-          },
-          error: null,
-        };
-      }
-      if (table === "site_meta") {
-        return { data: { site_id: "site-1", email: "person@example.com" }, error: null };
-      }
-      return { data: null, error: null };
-    }, { url: "https://wp.example.test/wp-admin" });
-
-    await getMagicLoginLink(supabase, "site-1", "person@example.com");
-
-    expect(functionCalls[0]).toEqual({
-      name: "get-magic-link",
-      body: {
-        siteId: "site-1",
-        staticSiteId: "canonical-static-id",
-        email: "person@example.com",
-      },
-    });
-  });
 });
 
 describe("createSite", () => {
@@ -134,12 +100,17 @@ describe("createSite", () => {
     secret_key: "server-secret",
   };
 
-  it("uses server-generated credentials and the reduced Lagos queue payload", async () => {
+  it("requires Docker assignment and queues platform provisioning API v1", async () => {
     const { supabase, functionCalls } = createSupabaseMock(
       { site_meta: { data: serverCredentials, error: null } },
       (name) => name === "create-site-record"
         ? {
-          site: { id: "42", name: "Example", url: "https://ab1234567890123.onstatic.studio" },
+          site: {
+            id: "42",
+            name: "Example",
+            url: "https://ab1234567890123.onstatic.studio",
+            hosting_provider: "static-studio-docker",
+          },
           provisioning: {
             identifier: "ab1234567890123",
             managed_url: "https://ab1234567890123.onstatic.studio",
@@ -159,7 +130,6 @@ describe("createSite", () => {
       provisioning: { identifier: "ab1234567890123" },
       credentials: {
         username: "server-user",
-        password: "server-password",
         basic_auth_user: "server-basic-user",
         basic_auth_password: "server-basic-password",
         admin_url: "https://wp-demo.onstatic.studio/wp-admin",
@@ -174,22 +144,26 @@ describe("createSite", () => {
         email: "person@example.com",
         user_id: "user-1",
         mount_path: "/blog",
+        platform_canary: true,
+        phpVersion: "8.4",
       },
     });
     expect(functionCalls[1]).toEqual({
-      name: "queue-site",
+      name: "queue-platform-site",
       body: {
-        siteHasMigration: false,
         site_id: "42",
-        apiVersion: 2,
+        apiVersion: 1,
         phpVersion: "8.4",
       },
     });
   });
 
-  it("uses the server-signed upload identity for migration provisioning", async () => {
+  it("uses a finalized private Docker artifact for migration provisioning", async () => {
     const directory = mkdtempSync(join(tmpdir(), "static-studio-site-"));
     const migrationFile = join(directory, "studio-backup-site.zip");
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const artifactKey =
+      `private/platform-migrations/ab1234567890123/${artifactId}/source.zip`;
     writeFileSync(migrationFile, "zip");
     vi.stubGlobal("fetch", async () =>
       new Response(null, { status: 200, headers: { etag: "migration-etag" } })
@@ -205,24 +179,36 @@ describe("createSite", () => {
               return {
                 token: "upload-token",
                 partCount: 1,
-                key: "public/site-migration-ab1234567890123.zip",
+                bucket: "platform_migrations",
+                key: artifactKey,
                 siteIdentifier: "ab1234567890123",
+                artifactId,
               };
             }
             if (action === "sign_parts") {
               return { urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }] };
             }
-            if (action === "complete") {
-              return {
-                ok: true,
-                key: "public/site-migration-ab1234567890123.zip",
-                siteIdentifier: "ab1234567890123",
-                migrationToken: "signed-migration-token",
-              };
-            }
+          }
+          if (name === "complete-migration-upload") {
+            return {
+              ok: true,
+              committed: true,
+              bucket: "platform_migrations",
+              key: artifactKey,
+              siteIdentifier: "ab1234567890123",
+              artifactId,
+              artifactStatus: "ready",
+              status: "ready",
+            };
           }
           if (name === "create-site-record") {
-            return { site: { id: "42", name: "Imported Site" } };
+            return {
+              site: {
+                id: "42",
+                name: "Imported Site",
+                hosting_provider: "static-studio-docker",
+              },
+            };
           }
           return { message: "Site queued" };
         },
@@ -243,25 +229,36 @@ describe("createSite", () => {
       expect(init?.body).toMatchObject({
         key: "public/site-migration-pending.zip",
         purpose: "new_site",
+        uploadProtocol: 3,
+        platformCanary: true,
       });
       expect(create?.body).toMatchObject({
         name: "Imported Site",
-        migration_token: "signed-migration-token",
+        migration_artifact_id: artifactId,
       });
       expect(create?.body).not.toHaveProperty("url");
-      expect(queue?.body).toMatchObject({ siteHasMigration: true });
+      expect(queue).toBeUndefined();
+      expect(functionCalls.find((call) => call.name === "queue-platform-site")?.body)
+        .toMatchObject({ site_id: "42", apiVersion: 1 });
     } finally {
       vi.unstubAllGlobals();
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it("reports when the server-created credential record is incomplete", async () => {
+  it("does not expose or require the WordPress administrator password", async () => {
     const { password: _password, ...incompleteCredentials } = serverCredentials;
     const { supabase } = createSupabaseMock(
       { site_meta: { data: incompleteCredentials, error: null } },
       (name) => name === "create-site-record"
-        ? { site: { id: "42", name: "Example", url: "https://demo.onstatic.studio" } }
+        ? {
+          site: {
+            id: "42",
+            name: "Example",
+            url: "https://demo.onstatic.studio",
+            hosting_provider: "static-studio-docker",
+          },
+        }
         : { message: "Site queued" },
     );
 
@@ -269,7 +266,69 @@ describe("createSite", () => {
       name: "Example",
       email: "person@example.com",
       userId: "user-1",
-    })).rejects.toThrow("password was missing from its server-generated credentials");
+    })).resolves.not.toHaveProperty("credentials.password");
+  });
+
+  it("preserves the created site identity when platform queueing fails", async () => {
+    const { supabase } = createSupabaseMock(
+      {},
+      (name) => name === "create-site-record"
+        ? {
+          site: {
+            id: "42",
+            name: "Recovered Site",
+            hosting_provider: "static-studio-docker",
+          },
+        }
+        : { ok: false, error: "queue unavailable" },
+    );
+
+    await expect(createSite(supabase, {
+      name: "Recovered Site",
+      email: "person@example.com",
+      userId: "user-1",
+    })).rejects.toThrow(
+      "Site 42 was created, but deployment could not be queued. queue unavailable",
+    );
+  });
+
+  it("resumes creation from a finalized Docker migration artifact", async () => {
+    const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const { supabase, functionCalls } = createSupabaseMock(
+      { site_meta: { data: serverCredentials, error: null } },
+      (name) => name === "create-site-record"
+        ? {
+          site: {
+            id: "42",
+            name: "Resumed Site",
+            hosting_provider: "static-studio-docker",
+          },
+        }
+        : { ok: true },
+    );
+
+    await createSite(supabase, {
+      name: "Resumed Site",
+      email: "person@example.com",
+      userId: "user-1",
+      migrationArtifactId: artifactId.toUpperCase(),
+    });
+
+    expect(functionCalls[0]?.body).toMatchObject({
+      migration_artifact_id: artifactId,
+    });
+  });
+
+  it("rejects a non-canonical migration artifact before site creation", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
+
+    await expect(createSite(supabase, {
+      name: "Invalid Artifact",
+      email: "person@example.com",
+      userId: "user-1",
+      migrationArtifactId: "not-an-artifact",
+    })).rejects.toThrow("canonical UUID");
+    expect(functionCalls).toEqual([]);
   });
 
   it("rejects unsupported PHP versions before creating a site record", async () => {
@@ -281,6 +340,23 @@ describe("createSite", () => {
       userId: "user-1",
       phpVersion: "9.0",
     })).rejects.toThrow("PHP version must be one of");
+    expect(functionCalls).toEqual([]);
+  });
+
+  it("rejects legacy PHP versions and Bedrock before creating a Docker site", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
+    await expect(createSite(supabase, {
+      name: "Legacy PHP",
+      email: "person@example.com",
+      userId: "user-1",
+      phpVersion: "8.1",
+    })).rejects.toThrow("PHP version must be one of");
+    await expect(createSite(supabase, {
+      name: "Bedrock",
+      email: "person@example.com",
+      userId: "user-1",
+      bedrock: true,
+    })).rejects.toThrow("Bedrock is not supported");
     expect(functionCalls).toEqual([]);
   });
 });
@@ -325,6 +401,31 @@ describe("siteSummaryRows", () => {
       status: "deployed",
       created_at: undefined,
     }]);
+  });
+});
+
+describe("Docker runtime controls", () => {
+  it("uses the lifecycle and runtime-policy Edge contracts", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({}, { ok: true });
+
+    await getPlatformSiteLifecycle(supabase, "42");
+    await updatePlatformSiteLifecycle(supabase, "42", "start");
+    await updatePlatformRuntimePolicy(supabase, "42", true);
+
+    expect(functionCalls).toEqual([
+      {
+        name: "platform-site-lifecycle",
+        body: { site_id: "42", action: "status" },
+      },
+      {
+        name: "platform-site-lifecycle",
+        body: { site_id: "42", action: "start" },
+      },
+      {
+        name: "platform-runtime-policy",
+        body: { site_id: "42", always_on: true },
+      },
+    ]);
   });
 });
 
