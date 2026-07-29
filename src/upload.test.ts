@@ -17,18 +17,21 @@ const PART_SIZE = 25 * 1024 * 1024;
 type InvokeBody = Record<string, any>;
 
 function protocolClient(
-  handler: (body: InvokeBody) => unknown | Promise<unknown>,
-): { supabase: any; bodies: InvokeBody[] } {
+  handler: (body: InvokeBody, name: string) => unknown | Promise<unknown>,
+): { supabase: any; bodies: InvokeBody[]; functionNames: string[] } {
   const bodies: InvokeBody[] = [];
+  const functionNames: string[] = [];
   return {
     bodies,
+    functionNames,
     supabase: {
       functions: {
         async invoke(name: string, options: { body?: InvokeBody } = {}) {
-          expect(name).toBe("get-upload-credentials");
+          expect(["get-upload-credentials", "complete-migration-upload"]).toContain(name);
           const body = options.body || {};
+          functionNames.push(name);
           bodies.push(body);
-          return { data: await handler(body), error: null };
+          return { data: await handler(body, name), error: null };
         },
       },
     },
@@ -174,24 +177,37 @@ describe("migration uploads", () => {
 
   it("uses the server-generated identity for new-site migration uploads", async () => {
     const filePath = join(directory, "new-studio-backup-1.zip");
+    const artifactId = "11111111-1111-4111-8111-111111111111";
+    const artifactKey =
+      `private/platform-migrations/ab1234567890123/${artifactId}/source.zip`;
     writeFileSync(filePath, "zip");
-    const { supabase, bodies } = protocolClient((body) => {
+    const { supabase, bodies, functionNames } = protocolClient((body, name) => {
       if (body.action === "init") {
         return {
           token: "new-site-token",
           partCount: 1,
-          key: "public/site-migration-ab1234567890123.zip",
+          bucket: "platform_migrations",
+          key: artifactKey,
           siteIdentifier: "ab1234567890123",
+          artifactId,
         };
       }
       if (body.action === "sign_parts") {
         return { urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }] };
       }
-      if (body.action === "complete") {
+      if (
+        name === "complete-migration-upload" &&
+        body.action === "complete_platform_direct"
+      ) {
         return {
           ok: true,
-          key: "public/site-migration-ab1234567890123.zip",
-          migrationToken: "signed-creation-token",
+          committed: true,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier: "ab1234567890123",
+          artifactId,
+          artifactStatus: "ready",
+          status: "ready",
         };
       }
       throw new Error(`Unexpected action: ${body.action}`);
@@ -204,17 +220,126 @@ describe("migration uploads", () => {
       filePath,
       newSite: true,
     })).resolves.toEqual({
-      bucket: "site_migrations",
-      key: "public/site-migration-ab1234567890123.zip",
+      bucket: "platform_migrations",
+      key: artifactKey,
       size: 3,
       siteIdentifier: "ab1234567890123",
-      migrationToken: "signed-creation-token",
+      artifactId,
     });
     expect(bodies[0]).toMatchObject({
       action: "init",
       key: "public/site-migration-pending.zip",
       purpose: "new_site",
+      uploadProtocol: 3,
+      platformCanary: true,
     });
+    expect(functionNames).toEqual([
+      "get-upload-credentials",
+      "get-upload-credentials",
+      "complete-migration-upload",
+    ]);
+  });
+
+  it("dispatches and confirms a signed direct Docker completion request", async () => {
+    const filePath = join(directory, "direct-studio-backup-1.zip");
+    const artifactId = "22222222-2222-4222-8222-222222222222";
+    const siteIdentifier = "ab1234567890123";
+    const artifactKey =
+      `private/platform-migrations/${siteIdentifier}/${artifactId}/source.zip`;
+    const completionBody =
+      '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
+      '<Part><ETag>&quot;etag&quot;</ETag><PartNumber>1</PartNumber></Part>' +
+      "</CompleteMultipartUpload>";
+    writeFileSync(filePath, "zip");
+    let completionCalls = 0;
+    const { supabase, bodies } = protocolClient((body, name) => {
+      if (name === "get-upload-credentials" && body.action === "init") {
+        return {
+          token: "direct-token",
+          partCount: 1,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+        };
+      }
+      if (name === "get-upload-credentials" && body.action === "sign_parts") {
+        return {
+          urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }],
+        };
+      }
+      if (
+        name === "complete-migration-upload" &&
+        body.action === "complete_platform_direct"
+      ) {
+        completionCalls += 1;
+        if (completionCalls === 1) {
+          return {
+            ok: true,
+            committed: false,
+            artifactId,
+            completionRequest: {
+              method: "POST",
+              url:
+                `https://yingqdimvkeqontaesxk.storage.supabase.co/storage/v1/s3/platform_migrations/${artifactKey}?uploadId=upload-1`,
+              contentType: "application/xml",
+              headers: {
+                Authorization:
+                  "AWS4-HMAC-SHA256 Credential=test/20260729/us-east-1/s3/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=" +
+                  "a".repeat(64),
+                "X-Amz-Content-Sha256": "b".repeat(64),
+                "X-Amz-Date": "20260729T090000Z",
+              },
+              body: completionBody,
+              expiresAt: Math.floor(Date.now() / 1_000) + 300,
+            },
+          };
+        }
+        return {
+          ok: true,
+          committed: true,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+          artifactStatus: "ready",
+          status: "ready",
+        };
+      }
+      throw new Error(`Unexpected ${name} action: ${body.action}`);
+    });
+    const completionRequests: RequestInit[] = [];
+    vi.stubGlobal(
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.hostname === "uploads.example.test") {
+          return new Response(null, {
+            status: 200,
+            headers: { etag: "direct-etag" },
+          });
+        }
+        completionRequests.push(init || {});
+        return new Response("<CompleteMultipartUploadResult/>", { status: 200 });
+      },
+    );
+
+    await uploadMigrationFile(supabase, { filePath, newSite: true });
+
+    expect(completionCalls).toBe(2);
+    expect(completionRequests).toHaveLength(1);
+    expect(completionRequests[0]).toMatchObject({
+      method: "POST",
+      body: completionBody,
+      redirect: "error",
+    });
+    expect(bodies.map((body) => body.action)).toEqual([
+      "init",
+      "sign_parts",
+      "complete_platform_direct",
+      "complete_platform_direct",
+    ]);
   });
 
   it("retries a failed part without double-counting progress", async () => {

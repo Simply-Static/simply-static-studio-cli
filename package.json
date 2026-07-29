@@ -1,6 +1,6 @@
 {
   "name": "@simply-static/static-studio",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Command-line interface for Static Studio hosting workflows.",
   "license": "MIT",
   "type": "module",
@@ -61,6 +61,7 @@
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "postcss": "^8.5.24"
   }
 }

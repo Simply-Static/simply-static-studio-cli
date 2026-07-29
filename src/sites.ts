@@ -1,7 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { SUPABASE_API_VERSION } from "./constants.js";
+import {
+  PLATFORM_HOSTING_PROVIDER,
+  PLATFORM_PROVISIONING_API_VERSION,
+} from "./constants.js";
 import { CliError } from "./errors.js";
-import { invokeFunction } from "./supabase.js";
+import { invokeFunction, invokeIdempotentFunction } from "./supabase.js";
 import { randomDomainWord } from "./random.js";
 import type { SiteMetaRecord, SiteRecord } from "./types.js";
 import { uploadMigrationFile, type UploadMigrationOptions } from "./upload.js";
@@ -20,6 +23,7 @@ export interface CreateSiteOptions {
   bedrock?: boolean;
   phpVersion?: string;
   mountPath?: string;
+  migrationArtifactId?: string;
 }
 
 export interface CreateSiteWithMigrationOptions extends CreateSiteOptions {
@@ -39,13 +43,55 @@ export interface CreateSiteResult {
   };
 }
 
+const SITE_CLIENT_SELECT = [
+  "id",
+  "created_at",
+  "site_id",
+  "server_id",
+  "url",
+  "managed_url",
+  "provisioning_id",
+  "name",
+  "status",
+  "notes",
+  "dns_record_id",
+  "event_id",
+  "static_site_record_id",
+  "pull_zone_id",
+  "storage_zone_id",
+  "export_details",
+  "migration_details",
+  "backup_last_checked_at",
+  "initial_export_done",
+  "is_migrating",
+  "is_docker_migrating",
+  "custom_domain",
+  "hp_webhook_pending",
+  "bedrock",
+  "mount_path",
+  "status_changed_at",
+  "mount_provider",
+  "first_deployed_at",
+  "backup_enabled",
+  "migration_upload_job_id",
+  "migration_upload_status",
+  "migration_upload_error",
+  "migration_upload_attempts",
+  "migration_upload_updated_at",
+  "hosting_provider",
+  "php_version",
+  "platform:platform_site(desired_state,observed_state,always_on)",
+].join(",");
+
 type PreparedSiteProvisioning = {
   name: string;
   mountPath: string;
-  phpVersion: (typeof PHP_VERSIONS)[number];
+  phpVersion: (typeof PLATFORM_PHP_VERSIONS)[number];
 };
 
-const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"] as const;
+const PLATFORM_PHP_VERSIONS = ["8.2", "8.3", "8.4"] as const;
+const CANONICAL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function normalizeSiteName(value: string | undefined): string {
   const name = String(value || randomDomainWord()).trim();
@@ -91,7 +137,7 @@ export async function listSites(
   let query = supabase
     .from("site")
     .select(
-      "*, user_site!inner(user_id, admin, owner_account_id),site_meta(email, admin_url, secret_key, pagespeed_desktop, pagespeed_mobile, ttfb)",
+      `${SITE_CLIENT_SELECT},user_site!inner(user_id,admin,owner_account_id),site_meta(email)`,
       { count: "exact" },
     )
     .eq("user_site.user_id", user.id)
@@ -116,20 +162,22 @@ export async function listSites(
   const { data, error, count } = await query.range(from, to);
   if (error) throw new CliError(error.message);
 
-  return { data: (data || []) as SiteRecord[], count: count || 0 };
+  return { data: (data || []) as unknown as SiteRecord[], count: count || 0 };
 }
 
 export async function getSite(supabase: SupabaseClient, siteId: string): Promise<SiteRecord> {
   const safeSiteId = assertSafeId(siteId, "siteId");
   const { data, error } = await supabase
     .from("site")
-    .select("*, site_meta(*), user_site(*)")
+    .select(
+      `${SITE_CLIENT_SELECT},user_site(user_id,email,admin,owner_account_id)`,
+    )
     .eq("id", safeSiteId)
     .maybeSingle();
 
   if (error) throw new CliError(error.message);
   if (!data) throw new CliError(`Site ${safeSiteId} was not found.`);
-  return data as SiteRecord;
+  return data as unknown as SiteRecord;
 }
 
 export async function getSiteMeta(
@@ -140,7 +188,9 @@ export async function getSiteMeta(
   const safeSiteId = assertSafeId(siteId, "siteId");
   let query = supabase
     .from("site_meta")
-    .select("*")
+    .select(
+      "id,site_id,email,username,basic_auth_user,basic_auth_password,admin_url,secret_key,storage,bandwidth,pagespeed_desktop,pagespeed_mobile,ttfb,pagespeed_updated_at",
+    )
     .eq("site_id", safeSiteId)
     .order("id", { ascending: false })
     .limit(1);
@@ -196,25 +246,15 @@ export async function getMagicLoginLink(
   supabase: SupabaseClient,
   siteId: string,
   email?: string,
-): Promise<{ url: string; siteId: string; staticSiteId: string; email: string }> {
+): Promise<{ url: string; siteId: string; email: string }> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  const [site, meta] = await Promise.all([
-    getSite(supabase, safeSiteId),
-    getSiteMeta(supabase, safeSiteId, email),
-  ]);
-  const staticSiteId = site.static_site_record_id
-    ? String(site.static_site_record_id)
-    : "";
-  if (!staticSiteId) {
-    throw new CliError(`Site ${safeSiteId} is missing static_site_record_id.`);
-  }
+  const meta = await getSiteMeta(supabase, safeSiteId, email);
   if (!meta.email) {
     throw new CliError(`No site_meta email found for site ${safeSiteId}.`);
   }
 
   const result = await invokeFunction<{ url?: string }>(supabase, "get-magic-link", {
     siteId: safeSiteId,
-    staticSiteId,
     email: meta.email,
   });
 
@@ -225,7 +265,6 @@ export async function getMagicLoginLink(
   return {
     url: stripUrlCredentials(result.url),
     siteId: safeSiteId,
-    staticSiteId,
     email: meta.email,
   };
 }
@@ -234,14 +273,22 @@ export async function createSite(
   supabase: SupabaseClient,
   options: CreateSiteOptions,
 ): Promise<CreateSiteResult> {
-  return provisionSite(supabase, options, prepareSiteProvisioning(options), false);
+  const migrationArtifactId = options.migrationArtifactId
+    ? normalizeMigrationArtifactId(options.migrationArtifactId)
+    : undefined;
+  return provisionSite(
+    supabase,
+    options,
+    prepareSiteProvisioning(options),
+    migrationArtifactId,
+  );
 }
 
 export async function createSiteWithMigration(
   supabase: SupabaseClient,
   options: CreateSiteWithMigrationOptions,
 ): Promise<CreateSiteResult & {
-  upload: Omit<Awaited<ReturnType<typeof uploadMigrationFile>>, "migrationToken" | "siteIdentifier">;
+  upload: Omit<Awaited<ReturnType<typeof uploadMigrationFile>>, "siteIdentifier">;
 }> {
   const prepared = prepareSiteProvisioning(options);
   const upload = await uploadMigrationFile(supabase, {
@@ -252,83 +299,129 @@ export async function createSiteWithMigration(
       : { allowAnyZipName: options.allowAnyZipName }),
     ...(options.onUploadProgress ? { onProgress: options.onUploadProgress } : {}),
   });
-  if (!upload.migrationToken) {
-    throw new CliError("Migration upload did not return a signed site creation token.");
+  if (!upload.artifactId) {
+    throw new CliError("Migration upload did not return a finalized Docker migration artifact.");
   }
   const result = await provisionSite(
     supabase,
     options,
     prepared,
-    true,
-    upload.migrationToken,
+    upload.artifactId,
   );
-  const { migrationToken: _migrationToken, siteIdentifier: _siteIdentifier, ...publicUpload } = upload;
+  const { siteIdentifier: _siteIdentifier, ...publicUpload } = upload;
   return { ...result, upload: publicUpload };
 }
 
 function prepareSiteProvisioning(options: CreateSiteOptions): PreparedSiteProvisioning {
+  if (options.bedrock) {
+    throw new CliError("Bedrock is not supported by the Docker platform.");
+  }
   return {
     name: normalizeSiteName(options.name),
     mountPath: normalizeMountPath(options.mountPath),
     phpVersion: requireAllowedValue(
       String(options.phpVersion || "8.3"),
-      PHP_VERSIONS,
+      PLATFORM_PHP_VERSIONS,
       "PHP version",
     ),
   };
+}
+
+function normalizeMigrationArtifactId(value: string): string {
+  const artifactId = String(value || "").trim().toLowerCase();
+  if (!CANONICAL_UUID_RE.test(artifactId)) {
+    throw new CliError("migration artifact ID must be a canonical UUID.");
+  }
+  return artifactId;
 }
 
 async function provisionSite(
   supabase: SupabaseClient,
   options: CreateSiteOptions,
   prepared: PreparedSiteProvisioning,
-  hasMigration: boolean,
-  migrationToken?: string,
+  migrationArtifactId?: string,
 ): Promise<CreateSiteResult> {
   const { name, mountPath, phpVersion } = prepared;
 
-  const recordResult = await invokeFunction<{
+  let recordResult: {
     site: SiteRecord;
     provisioning?: CreateSiteResult["provisioning"];
-  }>(supabase, "create-site-record", {
-    name,
-    ...(options.bedrock ? { bedrock: true } : {}),
-    email: options.email,
-    user_id: options.userId,
-    mount_path: mountPath,
-    ...(migrationToken ? { migration_token: migrationToken } : {}),
-  });
+  };
+  try {
+    recordResult = await invokeFunction(supabase, "create-site-record", {
+      name,
+      ...(options.bedrock ? { bedrock: true } : {}),
+      email: options.email,
+      user_id: options.userId,
+      mount_path: mountPath,
+      platform_canary: true,
+      phpVersion,
+      ...(migrationArtifactId ? { migration_artifact_id: migrationArtifactId } : {}),
+    });
+  } catch (error) {
+    if (!migrationArtifactId) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliError(
+      `Site creation for migration artifact ${migrationArtifactId} could not be confirmed. Check sites list before retrying with --migration-artifact-id ${migrationArtifactId}. ${detail}`,
+    );
+  }
 
-  const siteId = String(recordResult.site.id);
-  const queue = await invokeFunction(supabase, "queue-site", {
-    siteHasMigration: hasMigration,
-    site_id: siteId,
-    apiVersion: SUPABASE_API_VERSION,
-    phpVersion,
-  });
-  const meta = await getSiteMeta(supabase, siteId, options.email);
+  const siteId = String(recordResult?.site?.id || "");
+  if (!/^\d+$/.test(siteId) || Number(siteId) <= 0) {
+    throw new CliError("The site record was created without a valid ID.");
+  }
+  if (recordResult.site.hosting_provider !== PLATFORM_HOSTING_PROVIDER) {
+    throw new CliError(
+      `Site ${siteId} was created without the required Docker provider; deployment was not queued.`,
+    );
+  }
+  let queue: unknown;
+  try {
+    queue = await invokeFunction(supabase, "queue-platform-site", {
+      site_id: siteId,
+      apiVersion: PLATFORM_PROVISIONING_API_VERSION,
+      phpVersion,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliError(
+      `Site ${siteId} was created, but deployment could not be queued. ${detail}`,
+    );
+  }
+
+  let meta: SiteMetaRecord;
+  try {
+    meta = await getSiteMeta(supabase, siteId, options.email);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new CliError(
+      `Site ${siteId} was created and deployment was queued, but its credentials could not be loaded. ${detail}`,
+    );
+  }
 
   return {
     site: recordResult.site,
     queue,
     ...(recordResult.provisioning ? { provisioning: recordResult.provisioning } : {}),
-    credentials: {
-      username: requiredCredential(meta.username, "username"),
-      password: requiredCredential(meta.password, "password"),
-      basic_auth_user: requiredCredential(meta.basic_auth_user, "basic_auth_user"),
-      basic_auth_password: requiredCredential(meta.basic_auth_password, "basic_auth_password"),
-      admin_url: requiredCredential(meta.admin_url, "admin_url"),
-      secret_key: requiredCredential(meta.secret_key, "secret_key"),
-    },
+    credentials: publicCredentialsFromMeta(meta),
   };
 }
 
-function requiredCredential(value: unknown, field: string): string {
-  const credential = String(value || "");
-  if (!credential) {
-    throw new CliError(`The site was created, but ${field} was missing from its server-generated credentials.`);
+function publicCredentialsFromMeta(meta: SiteMetaRecord): Record<string, string> {
+  const credentials: Record<string, string> = {};
+  for (const field of [
+    "username",
+    "basic_auth_user",
+    "basic_auth_password",
+    "admin_url",
+    "secret_key",
+  ] as const) {
+    const value = String(meta[field] || "");
+    if (value) {
+      credentials[field] = value;
+    }
   }
-  return credential;
+  return credentials;
 }
 
 export async function updateSite(
@@ -345,13 +438,53 @@ export async function updateSite(
     throw new CliError("No changes supplied.");
   }
 
-  const { data, error } = await supabase.from("site").update(update).eq("id", safeSiteId).select().single();
+  const { data, error } = await supabase
+    .from("site")
+    .update(update)
+    .eq("id", safeSiteId)
+    .select(SITE_CLIENT_SELECT)
+    .single();
   if (error) throw new CliError(error.message);
-  return data as SiteRecord;
+  return data as unknown as SiteRecord;
 }
 
 export async function deleteSite(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  return invokeFunction(supabase, "queue-site-delete", { record_id: assertSafeId(siteId, "siteId") });
+  return invokeIdempotentFunction(supabase, "queue-site-delete", {
+    record_id: assertSafeId(siteId, "siteId"),
+    request_id: crypto.randomUUID(),
+  });
+}
+
+export async function getPlatformSiteLifecycle(
+  supabase: SupabaseClient,
+  siteId: string,
+): Promise<unknown> {
+  return invokeFunction(supabase, "platform-site-lifecycle", {
+    site_id: assertSafeId(siteId, "siteId"),
+    action: "status",
+  });
+}
+
+export async function updatePlatformSiteLifecycle(
+  supabase: SupabaseClient,
+  siteId: string,
+  action: "start" | "stop",
+): Promise<unknown> {
+  return invokeFunction(supabase, "platform-site-lifecycle", {
+    site_id: assertSafeId(siteId, "siteId"),
+    action,
+  });
+}
+
+export async function updatePlatformRuntimePolicy(
+  supabase: SupabaseClient,
+  siteId: string,
+  alwaysOn: boolean,
+): Promise<unknown> {
+  return invokeFunction(supabase, "platform-runtime-policy", {
+    site_id: assertSafeId(siteId, "siteId"),
+    always_on: alwaysOn,
+  });
 }
 
 export type SitePushMode = "full" | "changes";
@@ -387,6 +520,12 @@ export async function pushSite(
 }
 
 export async function redeploySite(supabase: SupabaseClient, siteId: string): Promise<unknown> {
+  const site = await getSite(supabase, siteId);
+  if (site.hosting_provider === PLATFORM_HOSTING_PROVIDER) {
+    throw new CliError(
+      "Replacement migration uploads are not available for Docker sites. Restore a Docker backup instead.",
+    );
+  }
   return invokeFunction(supabase, "redeploy-site", { site_id: siteId });
 }
 
@@ -394,6 +533,12 @@ export async function getSiteMigrationSubdomain(
   supabase: SupabaseClient,
   siteId: string,
 ): Promise<string> {
+  const site = await getSite(supabase, siteId);
+  if (site.hosting_provider === PLATFORM_HOSTING_PROVIDER) {
+    throw new CliError(
+      "Replacement migration uploads are not available for Docker sites. Restore a Docker backup instead.",
+    );
+  }
   const meta = await getSiteMeta(supabase, siteId);
   const adminUrl = meta.admin_url;
   if (adminUrl) {
@@ -403,7 +548,6 @@ export async function getSiteMigrationSubdomain(
     }
   }
 
-  const site = await getSite(supabase, siteId);
   const host = String(site.url || "").replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
   const subdomain = host.split(".")[0];
   if (!subdomain) {
@@ -435,12 +579,23 @@ export function siteSummaryRows(sites: SiteRecord[]): Record<string, unknown>[] 
   return sites.map((site) => {
     const mountPath = normalizeMountPath(site.mount_path);
     const baseUrl = String(site.url || "").replace(/\/+$/, "");
+    const platform = Array.isArray(site.platform) ? site.platform[0] : site.platform;
     return {
       id: site.id,
       name: site.name,
       url: baseUrl ? `${baseUrl}${mountPath}` : site.url,
       ...(mountPath ? { base_url: site.url, mount_path: mountPath } : {}),
       status: site.status,
+      ...(site.hosting_provider
+        ? { hosting_provider: site.hosting_provider }
+        : {}),
+      ...(site.hosting_provider === PLATFORM_HOSTING_PROVIDER
+        ? {
+          desired_state: platform?.desired_state ?? null,
+          observed_state: platform?.observed_state ?? null,
+          always_on: platform?.always_on === true,
+        }
+        : {}),
       created_at: site.created_at,
     };
   });

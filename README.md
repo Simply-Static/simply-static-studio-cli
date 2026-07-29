@@ -2,7 +2,7 @@
 
 Command-line interface for Static Studio hosting workflows. The package is intended for humans and coding agents such as Codex or Claude Code that need a narrow, scriptable interface to the Static Studio platform.
 
-This documentation covers release `0.1.5`.
+This documentation covers release `0.2.0`.
 
 ## Install
 
@@ -56,8 +56,14 @@ static-studio sites magic-login <siteId>
 static-studio sites debug-log <siteId> --tail 200
 static-studio sites create --name Demo --mount-path /blog
 static-studio sites create --name Import --migration-file ./site-studio-backup.zip
+static-studio sites create --name Import --migration-artifact-id <artifactId>
+static-studio sites runtime-status <siteId>
+static-studio sites start <siteId>
+static-studio sites stop <siteId>
+static-studio sites runtime-policy <siteId> always-on
 static-studio sites push <siteId> full
 static-studio sites push <siteId> changes
+# Legacy SpinupWP sites only:
 static-studio sites redeploy <siteId> --migration-file ./site-studio-backup.zip
 static-studio sites cancel-export <siteId> --yes
 static-studio sites migration-log <siteId>
@@ -103,9 +109,13 @@ static-studio reports schedule monthly <siteId> --name "Monthly report"
 static-studio reports disable-schedule <scheduleId>
 static-studio reports delete-schedule <scheduleId> --yes
 
-static-studio backups list <siteId> --refresh
+static-studio backups list <siteId>
 static-studio backups create <siteId>
-static-studio backups restore <siteId> --backup-id <backupId>
+static-studio backups get <siteId> <backupId>
+static-studio backups restore <siteId> --backup-id <backupId> --yes
+static-studio backups download <siteId> <backupId>
+static-studio backups copy <siteId> <backupId> <targetSiteId> --yes
+static-studio backups policy <siteId> daily
 
 static-studio redirects create <siteId> /old /new
 static-studio redirects update <siteId> <redirectId> --from-path /old --to-path /new
@@ -147,9 +157,13 @@ static-studio tags assign <siteId> <tagId>
 static-studio tags remove <siteId> <tagId>
 
 static-studio ssh add <siteId> --key-file ~/.ssh/id_ed25519.pub
+static-studio ssh list <siteId>
+static-studio ssh retry <siteId>
 ```
 
-New sites use managed Studio URLs and server-generated WordPress, Basic Auth, and secret credentials. Migration archives are uploaded with presigned multipart requests in 25 MiB parts, up to the 10 GB limit.
+New sites use the server-assigned Docker provider, managed Studio URLs, PHP 8.2–8.4, and server-generated Basic Auth/helper credentials. WordPress access uses short-lived magic links. New-site migration archives use private Docker artifacts with presigned multipart requests in 25 MiB parts, direct signed completion, and server-side validation, up to the 10 GB limit.
+
+Existing SpinupWP sites remain provider-bound to their legacy deployment, backup, and replacement-import workflows. Docker replacement imports are intentionally unavailable; use Docker backup restore or copy instead.
 
 The `--url` option on `performance run` and `performance get` is deprecated. If supplied for compatibility, it must resolve to the site's stored URL.
 

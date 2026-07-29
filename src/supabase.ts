@@ -246,11 +246,50 @@ export async function invokeFunction<T = unknown>(
     throw await resolveFunctionError(error);
   }
 
-  if (data && typeof data === "object" && "error" in data && data.error) {
-    throw new CliError(String((data as { error: unknown }).error));
+  if (
+    data &&
+    typeof data === "object" &&
+    (
+      ("error" in data && data.error) ||
+      ("ok" in data && data.ok === false) ||
+      ("success" in data && data.success === false)
+    )
+  ) {
+    const response = data as {
+      error?: unknown;
+      details?: unknown;
+      message?: unknown;
+      code?: unknown;
+      warning?: { details?: unknown; error?: unknown };
+    };
+    throw new CliError(String(
+      response.details ||
+      response.error ||
+      response.warning?.details ||
+      response.warning?.error ||
+      response.message ||
+      "The server rejected the request.",
+    ), 1, {
+      ...(typeof response.code === "string" ? { code: response.code } : {}),
+    });
   }
 
   return data as T;
+}
+
+export async function invokeIdempotentFunction<T = unknown>(
+  supabase: SupabaseClient,
+  name: string,
+  body?: unknown,
+): Promise<T> {
+  try {
+    return await invokeFunction<T>(supabase, name, body);
+  } catch (error) {
+    if (!(error instanceof CliError) || error.deliveryAmbiguous !== true) {
+      throw error;
+    }
+    return invokeFunction<T>(supabase, name, body);
+  }
 }
 
 export async function getCurrentUserId(profileName?: string): Promise<string> {
