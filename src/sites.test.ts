@@ -11,10 +11,11 @@ import {
   getMagicLoginLink,
   getPlatformSiteLifecycle,
   listSites,
+  redeploySite,
   siteSummaryRows,
   sitePushModeToExportType,
-  updatePlatformRuntimePolicy,
   updatePlatformSiteLifecycle,
+  updateSite,
 } from "./sites.js";
 import { createSupabaseMock } from "./test-utils.js";
 
@@ -89,6 +90,7 @@ describe("getMagicLoginLink", () => {
 });
 
 describe("createSite", () => {
+  const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const serverCredentials = {
     site_id: "42",
     email: "person@example.com",
@@ -112,8 +114,10 @@ describe("createSite", () => {
             hosting_provider: "static-studio-docker",
           },
           provisioning: {
+            queued: false,
             identifier: "ab1234567890123",
             managed_url: "https://ab1234567890123.onstatic.studio",
+            job: { id: "server-job-must-not-be-used" },
           },
         }
         : { message: "Site queued" },
@@ -125,6 +129,7 @@ describe("createSite", () => {
       userId: "user-1",
       mountPath: " /blog/ ",
       phpVersion: "8.4",
+      migrationArtifactId: artifactId,
     })).resolves.toMatchObject({
       site: { id: "42" },
       provisioning: { identifier: "ab1234567890123" },
@@ -146,6 +151,7 @@ describe("createSite", () => {
         mount_path: "/blog",
         platform_canary: true,
         phpVersion: "8.4",
+        migration_artifact_id: artifactId,
       },
     });
     expect(functionCalls[1]).toEqual({
@@ -156,6 +162,69 @@ describe("createSite", () => {
         phpVersion: "8.4",
       },
     });
+  });
+
+  it("uses the provisioning job returned by site creation without queueing twice", async () => {
+    const job = {
+      id: "20000000-0000-4000-8000-000000000002",
+      status: "pending_assignment",
+      generation: 1,
+    };
+    const { supabase, functionCalls } = createSupabaseMock(
+      { site_meta: { data: serverCredentials, error: null } },
+      (name) => {
+        if (name !== "create-site-record") {
+          throw new Error(`Unexpected function: ${name}`);
+        }
+        return {
+          site: {
+            id: "42",
+            name: "Server Queued",
+            hosting_provider: "static-studio-docker",
+          },
+          provisioning: {
+            queued: true,
+            identifier: "ab1234567890123",
+            job,
+            error: null,
+          },
+        };
+      },
+    );
+
+    await expect(createSite(supabase, {
+      name: "Server Queued",
+      email: "person@example.com",
+      userId: "user-1",
+      migrationArtifactId: artifactId,
+    })).resolves.toMatchObject({ queue: job });
+    expect(functionCalls.map(({ name }) => name)).toEqual(["create-site-record"]);
+  });
+
+  it.each(["7.4", "8.1"])("accepts Docker PHP %s", async (phpVersion) => {
+    const { supabase, functionCalls } = createSupabaseMock(
+      { site_meta: { data: serverCredentials, error: null } },
+      (name) => name === "create-site-record"
+        ? {
+          site: {
+            id: "42",
+            name: "Legacy PHP",
+            hosting_provider: "static-studio-docker",
+          },
+        }
+        : { ok: true },
+    );
+
+    await createSite(supabase, {
+      name: "Legacy PHP",
+      email: "person@example.com",
+      userId: "user-1",
+      phpVersion,
+      migrationArtifactId: artifactId,
+    });
+
+    expect(functionCalls[0]?.body).toMatchObject({ phpVersion });
+    expect(functionCalls[1]?.body).toMatchObject({ phpVersion });
   });
 
   it("uses a finalized private Docker artifact for migration provisioning", async () => {
@@ -266,6 +335,7 @@ describe("createSite", () => {
       name: "Example",
       email: "person@example.com",
       userId: "user-1",
+      migrationArtifactId: artifactId,
     })).resolves.not.toHaveProperty("credentials.password");
   });
 
@@ -287,13 +357,13 @@ describe("createSite", () => {
       name: "Recovered Site",
       email: "person@example.com",
       userId: "user-1",
+      migrationArtifactId: artifactId,
     })).rejects.toThrow(
       "Site 42 was created, but deployment could not be queued. queue unavailable",
     );
   });
 
   it("resumes creation from a finalized Docker migration artifact", async () => {
-    const artifactId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const { supabase, functionCalls } = createSupabaseMock(
       { site_meta: { data: serverCredentials, error: null } },
       (name) => name === "create-site-record"
@@ -331,6 +401,18 @@ describe("createSite", () => {
     expect(functionCalls).toEqual([]);
   });
 
+  it("rejects empty site creation before calling Studio", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
+
+    await expect(createSite(supabase, {
+      name: "Empty Site",
+      email: "person@example.com",
+      userId: "user-1",
+      migrationArtifactId: "",
+    })).rejects.toThrow("Empty site creation is temporarily unavailable");
+    expect(functionCalls).toEqual([]);
+  });
+
   it("rejects unsupported PHP versions before creating a site record", async () => {
     const { supabase, functionCalls } = createSupabaseMock({});
 
@@ -339,23 +421,19 @@ describe("createSite", () => {
       email: "person@example.com",
       userId: "user-1",
       phpVersion: "9.0",
+      migrationArtifactId: artifactId,
     })).rejects.toThrow("PHP version must be one of");
     expect(functionCalls).toEqual([]);
   });
 
-  it("rejects legacy PHP versions and Bedrock before creating a Docker site", async () => {
+  it("rejects Bedrock before creating a Docker site", async () => {
     const { supabase, functionCalls } = createSupabaseMock({});
-    await expect(createSite(supabase, {
-      name: "Legacy PHP",
-      email: "person@example.com",
-      userId: "user-1",
-      phpVersion: "8.1",
-    })).rejects.toThrow("PHP version must be one of");
     await expect(createSite(supabase, {
       name: "Bedrock",
       email: "person@example.com",
       userId: "user-1",
       bedrock: true,
+      migrationArtifactId: artifactId,
     })).rejects.toThrow("Bedrock is not supported");
     expect(functionCalls).toEqual([]);
   });
@@ -402,15 +480,37 @@ describe("siteSummaryRows", () => {
       created_at: undefined,
     }]);
   });
+
+  it("reports only the supported Docker lifecycle state", () => {
+    expect(siteSummaryRows([{
+      id: "42",
+      name: "Docker Site",
+      url: "https://example.test",
+      status: "deployed",
+      hosting_provider: "static-studio-docker",
+      platform: {
+        desired_state: "running",
+        observed_state: "running",
+        always_on: true,
+      },
+    }])).toEqual([{
+      id: "42",
+      name: "Docker Site",
+      url: "https://example.test",
+      status: "deployed",
+      desired_state: "running",
+      observed_state: "running",
+      created_at: undefined,
+    }]);
+  });
 });
 
 describe("Docker runtime controls", () => {
-  it("uses the lifecycle and runtime-policy Edge contracts", async () => {
+  it("uses the lifecycle Edge contract", async () => {
     const { supabase, functionCalls } = createSupabaseMock({}, { ok: true });
 
     await getPlatformSiteLifecycle(supabase, "42");
     await updatePlatformSiteLifecycle(supabase, "42", "start");
-    await updatePlatformRuntimePolicy(supabase, "42", true);
 
     expect(functionCalls).toEqual([
       {
@@ -421,11 +521,102 @@ describe("Docker runtime controls", () => {
         name: "platform-site-lifecycle",
         body: { site_id: "42", action: "start" },
       },
-      {
-        name: "platform-runtime-policy",
-        body: { site_id: "42", always_on: true },
-      },
     ]);
+  });
+});
+
+describe("site updates", () => {
+  it("routes name updates through the administrator-only Edge function", async () => {
+    const { supabase, functionCalls, calls } = createSupabaseMock(
+      {},
+      { ok: true, site: { id: "42", name: "Renamed site" } },
+    );
+
+    await expect(updateSite(supabase, "42", {
+      name: "  Renamed site  ",
+    })).resolves.toEqual({ id: "42", name: "Renamed site" });
+    expect(functionCalls).toEqual([{
+      name: "update-site-name",
+      body: { site_id: "42", name: "Renamed site" },
+    }]);
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps notes as the only direct site-table mutation", async () => {
+    const updated = { id: "42", notes: "Private note" };
+    const { supabase, calls, functionCalls } = createSupabaseMock({
+      site: { data: updated, error: null },
+    });
+
+    await expect(updateSite(supabase, "42", {
+      notes: "Private note",
+    })).resolves.toEqual(updated);
+    expect(calls).toContainEqual({
+      table: "site",
+      method: "update",
+      args: [{ notes: "Private note" }],
+    });
+    expect(functionCalls).toEqual([]);
+  });
+
+  it("rejects combined name and notes updates before making partial changes", async () => {
+    const { supabase, calls, functionCalls } = createSupabaseMock({});
+
+    await expect(updateSite(supabase, "42", {
+      name: "Renamed site",
+      notes: "Private note",
+    })).rejects.toThrow("separate commands");
+    expect(calls).toEqual([]);
+    expect(functionCalls).toEqual([]);
+  });
+
+  it("rejects direct status mutations", async () => {
+    const { supabase, calls, functionCalls } = createSupabaseMock({});
+
+    await expect(updateSite(
+      supabase,
+      "42",
+      { status: "deployed" } as { name?: string; notes?: string },
+    )).rejects.toThrow(/status cannot be updated directly/i);
+    expect(calls).toEqual([]);
+    expect(functionCalls).toEqual([]);
+  });
+});
+
+describe("Docker redeployments", () => {
+  it("queues an ordinary redeploy through platform API v1", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({}, { status: "queued" });
+
+    await redeploySite(supabase, "42");
+
+    expect(functionCalls).toEqual([{
+      name: "redeploy-site",
+      body: { site_id: "42", apiVersion: 1 },
+    }]);
+  });
+
+  it("queues a replacement with a normalized migration artifact", async () => {
+    const artifactId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const { supabase, functionCalls } = createSupabaseMock({}, { status: "queued" });
+
+    await redeploySite(supabase, "42", artifactId);
+
+    expect(functionCalls).toEqual([{
+      name: "redeploy-site",
+      body: {
+        site_id: "42",
+        apiVersion: 1,
+        migration_artifact_id: artifactId.toLowerCase(),
+      },
+    }]);
+  });
+
+  it("rejects an invalid replacement artifact before invoking the API", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
+
+    await expect(redeploySite(supabase, "42", "not-an-artifact"))
+      .rejects.toThrow(/canonical UUID/i);
+    expect(functionCalls).toEqual([]);
   });
 });
 
@@ -456,6 +647,21 @@ describe("listSites validation", () => {
     const select = calls.find((call) => call.table === "site" && call.method === "select");
     expect(String(select?.args[0])).toContain("site_meta(email");
     expect(String(select?.args[0])).not.toContain("site_meta!inner");
+    expect(String(select?.args[0])).toContain("wordpress_base_domain");
+    expect(String(select?.args[0])).toContain(
+      "platform:platform_site(desired_state,observed_state)",
+    );
+    for (const retiredColumn of [
+      "site_id",
+      "server_id",
+      "event_id",
+      "backup_last_checked_at",
+      "is_docker_migrating",
+      "hosting_provider",
+      "always_on",
+    ]) {
+      expect(String(select?.args[0])).not.toContain(retiredColumn);
+    }
   });
 
   it("rejects unsafe sort fields before querying", async () => {

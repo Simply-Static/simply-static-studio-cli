@@ -6,11 +6,6 @@ import { assertSafeId, parsePositiveInteger } from "./validation.js";
 const DEFAULT_RELEASE_LIMIT = 10;
 const MAX_RELEASE_LIMIT = 100;
 
-export interface MigrationLogResult {
-  content: string;
-  line_count: number;
-}
-
 export interface SiteReleaseRecord {
   id: string;
   site_id: string | number;
@@ -57,15 +52,6 @@ export async function cancelExport(
   siteId: string,
 ): Promise<unknown> {
   return invokeFunction(supabase, "cancel-export", {
-    site_id: assertSafeId(siteId, "siteId"),
-  });
-}
-
-export async function getMigrationLog(
-  supabase: SupabaseClient,
-  siteId: string,
-): Promise<MigrationLogResult> {
-  return invokeFunction<MigrationLogResult>(supabase, "migration-log", {
     site_id: assertSafeId(siteId, "siteId"),
   });
 }

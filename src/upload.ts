@@ -14,6 +14,8 @@ const RETRY_DELAY_MS = 200;
 const PLATFORM_COMPLETION_ATTEMPTS = 8;
 const PLATFORM_FINALIZATION_POLL_MS = 2_000;
 const PLATFORM_FINALIZATION_POLLS = 300;
+const COMPLETION_SIGNATURE_TTL_SECONDS = 15 * 60;
+const LEGACY_COMPLETION_EXPIRY_DRIFT_SECONDS = 5;
 const PLATFORM_COMPLETION_FUNCTION = "complete-migration-upload";
 const PLATFORM_MIGRATION_BUCKET = "platform_migrations";
 const PLATFORM_STORAGE_ORIGIN =
@@ -22,9 +24,9 @@ const SUBDOMAIN_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const PLATFORM_ARTIFACT_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PLATFORM_ARTIFACT_KEY_RE =
-  /^private\/platform-migrations\/([a-z]{2}[a-z0-9]{13})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/source\.(?:zip|tar\.gz)$/;
+  /^private\/platform-migrations\/([a-z]{2}[a-z0-9]{13})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/source\.(?:zip|tar\.gz|wpress|daf)$/;
 const PLATFORM_COMPLETION_PATH_RE =
-  /^\/storage\/v1\/s3\/platform_migrations\/private\/platform-migrations\/[a-z]{2}[a-z0-9]{13}\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/source\.(?:zip|tar\.gz)$/;
+  /^\/storage\/v1\/s3\/platform_migrations\/private\/platform-migrations\/[a-z]{2}[a-z0-9]{13}\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/source\.(?:zip|tar\.gz|wpress|daf)$/;
 
 type MigrationObjectInfo = {
   bucket: string;
@@ -47,6 +49,7 @@ export interface UploadMigrationOptions {
   filePath: string;
   subdomain?: string;
   newSite?: boolean;
+  siteId?: string;
   allowAnyZipName?: boolean;
   onProgress?: (progress: { loaded: number; total?: number }) => void;
 }
@@ -65,13 +68,22 @@ export function getMigrationObjectInfo(
 
   const fileName = basename(filePath).toLowerCase();
   const isTarGz = fileName.endsWith(".tar.gz") || fileName.endsWith(".tgz");
+  const isWpress = fileName.endsWith(".wpress");
+  const isDaf = fileName.endsWith(".daf");
   const isZip = fileName.endsWith(".zip");
-  if (!isTarGz && !isZip) {
-    throw new CliError("Migration files must end in .zip, .tar.gz, or .tgz.");
-  }
-  if (isZip && !allowAnyZipName && !fileName.includes("studio-backup-")) {
+  if (!isTarGz && !isWpress && !isDaf && !isZip) {
     throw new CliError(
-      "ZIP migration files must be exported by Static Studio Backup and Migrate and include `studio-backup-` in the filename.",
+      "Migration files must end in .zip, .tar.gz, .tgz, .wpress, or .daf.",
+    );
+  }
+  if (
+    isZip &&
+    !allowAnyZipName &&
+    !fileName.includes("studio-backup-") &&
+    !fileName.endsWith("_archive.zip")
+  ) {
+    throw new CliError(
+      "ZIP migration files must be a Static Studio backup containing `studio-backup-` or ending in `_archive.zip`.",
     );
   }
 
@@ -92,11 +104,21 @@ export function getMigrationObjectInfo(
     throw new CliError("The selected file exceeds the 10 GB migration upload limit.");
   }
 
-  const extension = isTarGz ? ".tar.gz" : ".zip";
+  const extension = isTarGz
+    ? ".tar.gz"
+    : isWpress
+    ? ".wpress"
+    : isDaf
+    ? ".daf"
+    : ".zip";
   return {
     bucket: "site_migrations",
     key: `public/site-migration-${cleanSubdomain}${extension}`,
-    contentType: isTarGz ? "application/gzip" : "application/zip",
+    contentType: isTarGz
+      ? "application/gzip"
+      : isWpress || isDaf
+      ? "application/octet-stream"
+      : "application/zip",
     size: info.size,
   };
 }
@@ -130,6 +152,26 @@ type PlatformCompletionRequest = {
   body: string;
 };
 
+function awsSignedAtSeconds(value: string): number | null {
+  const match = String(value || "").match(
+    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,
+  );
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  const timestamp = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  );
+  const normalized = new Date(timestamp).toISOString()
+    .replace(/[-:]/g, "")
+    .replace(".000", "");
+  return normalized === value ? Math.floor(timestamp / 1_000) : null;
+}
+
 function validatePlatformCompletionRequest(
   value: unknown,
   artifactId: string,
@@ -162,7 +204,7 @@ function validatePlatformCompletionRequest(
   const signedDate = String(headers?.["X-Amz-Date"] || "");
   const body = typeof request?.body === "string" ? request.body : "";
   const expiresAt = Number(request?.expiresAt);
-  const now = Math.floor(Date.now() / 1_000);
+  const signedAt = awsSignedAtSeconds(signedDate);
   if (
     result.committed !== false ||
     result.artifactId !== artifactId ||
@@ -178,10 +220,11 @@ function validatePlatformCompletionRequest(
     !/^AWS4-HMAC-SHA256 Credential=[A-Za-z0-9_-]+\/[0-9]{8}\/us-east-1\/s3\/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, Signature=[0-9a-f]{64}$/
       .test(authorization) ||
     !/^[0-9a-f]{64}$/.test(contentSha256) ||
-    !/^[0-9]{8}T[0-9]{6}Z$/.test(signedDate) ||
+    signedAt === null ||
     !Number.isInteger(expiresAt) ||
-    expiresAt <= now ||
-    expiresAt > now + 15 * 60 ||
+    expiresAt < signedAt + COMPLETION_SIGNATURE_TTL_SECONDS ||
+    expiresAt > signedAt + COMPLETION_SIGNATURE_TTL_SECONDS +
+      LEGACY_COMPLETION_EXPIRY_DRIFT_SECONDS ||
     body.length < 100 ||
     body.length > 256 * 1024 ||
     !body.startsWith('<?xml version="1.0" encoding="UTF-8"?>') ||
@@ -485,15 +528,24 @@ export async function uploadMigrationFile(
   size: number;
   artifactId?: string;
   siteIdentifier?: string;
+  siteId?: string;
 }> {
+  const siteId = options.siteId === undefined
+    ? undefined
+    : String(options.siteId).trim();
+  if (siteId !== undefined && (!/^\d+$/.test(siteId) || Number(siteId) <= 0)) {
+    throw new CliError("siteId must be a positive numeric site ID.");
+  }
+  const platformUpload = options.newSite === true || siteId !== undefined;
   const object = getMigrationObjectInfo(
     options.filePath,
-    options.newSite ? "pending" : String(options.subdomain || ""),
+    platformUpload ? "pending" : String(options.subdomain || ""),
     options.allowAnyZipName,
   );
   const partCount = Math.ceil(object.size / DEFAULT_PART_SIZE);
   let uploadToken: string | undefined;
   let platformCompletionDispatched = false;
+  let platformArtifactId: string | undefined;
   let file: FileHandle | undefined;
 
   try {
@@ -510,6 +562,7 @@ export async function uploadMigrationFile(
       key?: unknown;
       siteIdentifier?: unknown;
       artifactId?: unknown;
+      siteId?: unknown;
     }>(supabase, {
       action: "init",
       bucket: object.bucket,
@@ -517,11 +570,12 @@ export async function uploadMigrationFile(
       contentType: object.contentType,
       fileSize: object.size,
       partSize: DEFAULT_PART_SIZE,
-      ...(options.newSite
+      ...(platformUpload
         ? {
           purpose: "new_site",
           uploadProtocol: 3,
           platformCanary: true,
+          ...(siteId ? { siteId } : {}),
         }
         : {}),
     });
@@ -544,22 +598,28 @@ export async function uploadMigrationFile(
     const artifactId = typeof initialized.artifactId === "string"
       ? initialized.artifactId
       : undefined;
-    if (options.newSite) {
+    const resolvedSiteId = initialized.siteId === undefined
+      ? undefined
+      : String(initialized.siteId);
+    if (platformUpload) {
       const keyMatch = resolvedKey.match(PLATFORM_ARTIFACT_KEY_RE);
       if (
         resolvedBucket !== PLATFORM_MIGRATION_BUCKET ||
         !/^[a-z]{2}[a-z0-9]{13}$/.test(siteIdentifier || "") ||
         !PLATFORM_ARTIFACT_ID_RE.test(artifactId || "") ||
         keyMatch?.[1] !== siteIdentifier ||
-        keyMatch?.[2] !== artifactId
+        keyMatch?.[2] !== artifactId ||
+        (siteId !== undefined && resolvedSiteId !== siteId) ||
+        (siteId === undefined && resolvedSiteId !== undefined)
       ) {
         throw new CliError(
           "Upload service returned an invalid Docker migration artifact target.",
         );
       }
+      platformArtifactId = artifactId;
     } else if (
       resolvedBucket !== object.bucket ||
-      !/^public\/site-migration-[a-z0-9][a-z0-9-]{0,62}\.(?:zip|tar\.gz)$/
+      !/^public\/site-migration-[a-z0-9][a-z0-9-]{0,62}\.(?:zip|tar\.gz|wpress|daf)$/
         .test(resolvedKey)
     ) {
       throw new CliError("Upload service returned an invalid migration object key.");
@@ -592,8 +652,8 @@ export async function uploadMigrationFile(
     }
 
     completedParts.sort((a, b) => a.partNumber - b.partNumber);
-    platformCompletionDispatched = options.newSite === true;
-    const completed = options.newSite
+    platformCompletionDispatched = platformUpload;
+    const completed = platformUpload
       ? await completePlatformUpload(supabase, artifactId!)
       : await invokeUploadAction<Record<string, unknown>>(supabase, {
         action: "complete",
@@ -612,12 +672,12 @@ export async function uploadMigrationFile(
     if (
       completedBucket !== resolvedBucket ||
       completedKey !== resolvedKey ||
-      (options.newSite && completed.artifactId !== artifactId)
+      (platformUpload && completed.artifactId !== artifactId)
     ) {
       throw new CliError("Upload service returned inconsistent migration object keys.");
     }
     if (
-      options.newSite &&
+      platformUpload &&
       String(completed.artifactStatus || "") !== "ready"
     ) {
       await waitForPlatformArtifact(supabase, artifactId!);
@@ -629,6 +689,7 @@ export async function uploadMigrationFile(
       size: object.size,
       ...(artifactId ? { artifactId } : {}),
       ...(siteIdentifier ? { siteIdentifier } : {}),
+      ...(resolvedSiteId ? { siteId: resolvedSiteId } : {}),
     };
   } catch (error) {
     if (uploadToken && !platformCompletionDispatched) {
@@ -636,6 +697,20 @@ export async function uploadMigrationFile(
         action: "abort",
         token: uploadToken,
       }).catch(() => undefined);
+    }
+    if (platformCompletionDispatched && platformArtifactId) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const source = error instanceof CliError ? error : undefined;
+      throw new CliError(
+        `Migration artifact ${platformArtifactId} may be ready or still finalizing. Wait before retrying with --migration-artifact-id ${platformArtifactId}. ${detail}`,
+        source?.exitCode || 1,
+        {
+          ...(source?.status !== undefined ? { status: source.status } : {}),
+          ...(source?.code ? { code: source.code } : {}),
+          deliveryAmbiguous: true,
+          artifactId: platformArtifactId,
+        },
+      );
     }
     throw error;
   } finally {

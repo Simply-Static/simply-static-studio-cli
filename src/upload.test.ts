@@ -63,6 +63,8 @@ describe("migration uploads", () => {
     it("creates the expected storage object for supported archives", () => {
       const zip = file("demo-studio-backup-1.zip", 3);
       const tgz = file("demo.tgz", 7);
+      const wpress = file("demo.wpress", 11);
+      const daf = file("demo.daf", 13);
 
       expect(getMigrationObjectInfo(zip, "abc123")).toEqual({
         bucket: "site_migrations",
@@ -76,14 +78,28 @@ describe("migration uploads", () => {
         contentType: "application/gzip",
         size: 7,
       });
+      expect(getMigrationObjectInfo(wpress, "demo-site")).toEqual({
+        bucket: "site_migrations",
+        key: "public/site-migration-demo-site.wpress",
+        contentType: "application/octet-stream",
+        size: 11,
+      });
+      expect(getMigrationObjectInfo(daf, "demo-site")).toEqual({
+        bucket: "site_migrations",
+        key: "public/site-migration-demo-site.daf",
+        contentType: "application/octet-stream",
+        size: 13,
+      });
     });
 
     it("validates filenames, subdomains, and non-empty files", () => {
       const arbitraryZip = file("demo.zip", 3);
+      const duplicatorZip = file("20261016_example_archive.zip", 3);
       const emptyZip = file("empty-studio-backup-1.zip", 0);
 
       expect(() => getMigrationObjectInfo(arbitraryZip, "abc123")).toThrow(CliError);
       expect(() => getMigrationObjectInfo(arbitraryZip, "abc123", true)).not.toThrow();
+      expect(() => getMigrationObjectInfo(duplicatorZip, "abc123")).not.toThrow();
       expect(() => getMigrationObjectInfo(arbitraryZip, "UPPER", true)).toThrow(/subdomain/i);
       expect(() => getMigrationObjectInfo(emptyZip, "abc123")).toThrow(/empty/i);
     });
@@ -240,7 +256,163 @@ describe("migration uploads", () => {
     ]);
   });
 
-  it("dispatches and confirms a signed direct Docker completion request", async () => {
+  it("preserves the artifact ID when finalization becomes ambiguous", async () => {
+    const filePath = join(directory, "ambiguous-studio-backup-1.zip");
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const siteIdentifier = "ab1234567890123";
+    const artifactKey =
+      `private/platform-migrations/${siteIdentifier}/${artifactId}/source.zip`;
+    writeFileSync(filePath, "zip");
+    const { supabase, bodies } = protocolClient((body, name) => {
+      if (name === "get-upload-credentials" && body.action === "init") {
+        return {
+          token: "ambiguous-token",
+          partCount: 1,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+        };
+      }
+      if (name === "get-upload-credentials" && body.action === "sign_parts") {
+        return {
+          urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }],
+        };
+      }
+      if (
+        name === "complete-migration-upload" &&
+        body.action === "complete_platform_direct"
+      ) {
+        return {
+          ok: true,
+          committed: true,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+          artifactStatus: "pending",
+          status: "pending",
+        };
+      }
+      if (
+        name === "complete-migration-upload" &&
+        body.action === "artifact_status"
+      ) {
+        return { ready: false, artifactId, status: "failed" };
+      }
+      throw new Error(`Unexpected ${name} action: ${body.action}`);
+    });
+    vi.stubGlobal("fetch", async () =>
+      new Response(null, { status: 200, headers: { etag: "ambiguous-etag" } })
+    );
+
+    let caught: unknown;
+    try {
+      await uploadMigrationFile(supabase, { filePath, newSite: true });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(CliError);
+    expect(caught).toMatchObject({
+      artifactId,
+      deliveryAmbiguous: true,
+    });
+    expect((caught as Error).message).toContain(
+      `--migration-artifact-id ${artifactId}`,
+    );
+    expect(bodies.map((body) => body.action)).not.toContain("abort");
+  });
+
+  it("uses the private v3 artifact protocol for an existing Docker site", async () => {
+    const filePath = join(directory, "replacement.wpress");
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const siteIdentifier = "ab1234567890123";
+    const artifactKey =
+      `private/platform-migrations/${siteIdentifier}/${artifactId}/source.wpress`;
+    writeFileSync(filePath, "backup");
+    const { supabase, bodies, functionNames } = protocolClient((body, name) => {
+      if (name === "get-upload-credentials" && body.action === "init") {
+        return {
+          token: "replacement-token",
+          partCount: 1,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+          siteId: "42",
+        };
+      }
+      if (name === "get-upload-credentials" && body.action === "sign_parts") {
+        return {
+          urls: [{ partNumber: 1, url: "https://uploads.example.test/1" }],
+        };
+      }
+      if (
+        name === "complete-migration-upload" &&
+        body.action === "complete_platform_direct"
+      ) {
+        return {
+          ok: true,
+          committed: true,
+          bucket: "platform_migrations",
+          key: artifactKey,
+          siteIdentifier,
+          artifactId,
+          artifactStatus: "ready",
+          status: "ready",
+        };
+      }
+      throw new Error(`Unexpected ${name} action: ${body.action}`);
+    });
+    vi.stubGlobal("fetch", async () =>
+      new Response(null, { status: 200, headers: { etag: "replacement-etag" } })
+    );
+
+    await expect(uploadMigrationFile(supabase, {
+      filePath,
+      siteId: "42",
+    })).resolves.toEqual({
+      bucket: "platform_migrations",
+      key: artifactKey,
+      size: 6,
+      siteIdentifier,
+      artifactId,
+      siteId: "42",
+    });
+    expect(bodies[0]).toEqual({
+      action: "init",
+      bucket: "site_migrations",
+      key: "public/site-migration-pending.wpress",
+      contentType: "application/octet-stream",
+      fileSize: 6,
+      partSize: PART_SIZE,
+      purpose: "new_site",
+      uploadProtocol: 3,
+      platformCanary: true,
+      siteId: "42",
+    });
+    expect(functionNames).toEqual([
+      "get-upload-credentials",
+      "get-upload-credentials",
+      "complete-migration-upload",
+    ]);
+  });
+
+  it("rejects an invalid existing-site target before opening an upload", async () => {
+    const filePath = file("replacement.daf", 3);
+    const { supabase, bodies } = protocolClient(() => {
+      throw new Error("unexpected invocation");
+    });
+
+    await expect(uploadMigrationFile(supabase, {
+      filePath,
+      siteId: "site-42",
+    })).rejects.toThrow(/positive numeric site ID/i);
+    expect(bodies).toEqual([]);
+  });
+
+  it("dispatches a signed Docker completion despite negative local clock skew", async () => {
     const filePath = join(directory, "direct-studio-backup-1.zip");
     const artifactId = "22222222-2222-4222-8222-222222222222";
     const siteIdentifier = "ab1234567890123";
@@ -251,6 +423,8 @@ describe("migration uploads", () => {
       '<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
       '<Part><ETag>&quot;etag&quot;</ETag><PartNumber>1</PartNumber></Part>' +
       "</CompleteMultipartUpload>";
+    const signedAt = Date.UTC(2026, 6, 29, 9, 0, 0) / 1_000;
+    vi.spyOn(Date, "now").mockReturnValue((signedAt - 5 * 60) * 1_000);
     writeFileSync(filePath, "zip");
     let completionCalls = 0;
     const { supabase, bodies } = protocolClient((body, name) => {
@@ -292,7 +466,7 @@ describe("migration uploads", () => {
                 "X-Amz-Date": "20260729T090000Z",
               },
               body: completionBody,
-              expiresAt: Math.floor(Date.now() / 1_000) + 300,
+              expiresAt: signedAt + 15 * 60,
             },
           };
         }

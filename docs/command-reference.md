@@ -1,6 +1,6 @@
 # Command Reference
 
-All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`. This reference covers release `0.2.0`.
+All commands support the global `--json` and `--profile <name>` options. The `sss` binary is an alias for `static-studio`. This reference covers release `0.3.0`.
 
 ## Root Commands
 
@@ -9,10 +9,20 @@ All commands support the global `--json` and `--profile <name>` options. The `ss
 Sign in with email OTP, store a Personal Access Token, or store a Supabase session token pair.
 
 ```bash
-static-studio login [--email <email>] [--otp <code>] [--token <token>] [--refresh-token <token>] [--create-user]
+static-studio login [--email <email>] [--otp <code> | --request-only] [--captcha-token <token>] [--no-browser] [--token <token>] [--refresh-token <token>] [--create-user]
 ```
 
-If `--token` is present, token login is used. Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token**. Issuance and exchange require an active subscription with quota greater than zero; trial status alone is not a categorical exclusion. Pass a Personal Access Token without `--refresh-token`, which is only for Supabase session access tokens. Otherwise the CLI starts email OTP login.
+If `--token` is present, token login is used. Personal Access Tokens are generated in the Static Studio app under **Account -> Access Token**. Issuance and exchange require an active subscription with quota greater than zero; trial status alone is not a categorical exclusion. Pass a Personal Access Token without `--refresh-token`, which is only for Supabase session access tokens.
+
+Otherwise the CLI starts email OTP login. Before it requests a new email code,
+it serves a temporary Cloudflare Turnstile challenge on `127.0.0.1`, prints the
+URL, and attempts to open it in the default browser. `--no-browser` skips the
+automatic launch for manual opening. `--captcha-token` supplies an existing
+short-lived Turnstile token instead of starting the local browser flow.
+Use `--request-only` to request the code and exit, then pass that code with
+`--otp`; the verification invocation does not request a replacement code or
+run Turnstile again.
+Personal Access Token and Supabase session-token login do not use Turnstile.
 
 ### `logout`
 
@@ -56,7 +66,9 @@ static-studio sites list [--page <number>] [--page-size <number>] [--search <ter
 | `--sort <field>` | `created_at` | One of `id`, `name`, `url`, `status`, `created_at`, `updated_at`. |
 | `--asc` | off | Sort ascending instead of descending. |
 
-Non-JSON output shows summary rows with `id`, `name`, `url`, `status`, `hosting_provider`, and `created_at`. Docker rows also include normalized desired/observed runtime state and their always-on policy.
+Non-JSON output shows summary rows with `id`, `name`, `url`, `status`, and
+`created_at`. Platform rows also include normalized desired and observed
+runtime state.
 
 ### `sites get`
 
@@ -113,7 +125,7 @@ When `--output-file` is used without `--json`, stdout contains metadata and the 
 
 ### `sites create`
 
-Create and queue a new Static Studio site.
+Import and queue a new Static Studio site.
 
 ```bash
 static-studio sites create [options]
@@ -123,24 +135,27 @@ static-studio sites create [options]
 | --- | --- | --- |
 | `--name <name>` | generated | Site display name. |
 | `--mount-path <path>` | none | Serve the static site below this public URL path, for example `/blog`. |
-| `--php-version <version>` | `8.3` | Docker PHP version: `8.2`, `8.3`, or `8.4`. |
-| `--migration-file <path>` | none | Upload a migration archive before queueing the site. |
-| `--migration-artifact-id <id>` | none | Resume creation from a finalized private Docker migration artifact. |
+| `--php-version <version>` | `8.3` | Platform PHP version: `7.4`, `8.1`, `8.2`, `8.3`, or `8.4`. |
+| `--migration-file <path>` | required alternative | Upload a migration archive before queueing the site. |
+| `--migration-artifact-id <id>` | required alternative | Resume creation from a finalized private Docker migration artifact. |
 | `--allow-any-zip-name` | off | Skip Static Studio backup ZIP filename validation. |
 
-The site name is display metadata and can be changed later. The server assigns the exact `static-studio-docker` provider and independently generates an opaque, immutable infrastructure identity for the managed static hostname, WordPress hostname, CDN resources, and runtime. The managed hostname cannot be selected during creation or removed later. Connect a custom domain after provisioning with `domains add` or `domains primary`; the managed hostname remains connected as the fallback. The command prints approved Basic Auth/helper credentials but does not retrieve the WordPress administrator password. Use `sites magic-login` for WordPress access.
+Exactly one of `--migration-file` or `--migration-artifact-id` is required while Studio's abuse-control switch temporarily disables empty-site creation. The site name is display metadata and can be changed later. The server assigns the exact `static-studio-docker` provider and independently generates an opaque, immutable infrastructure identity for the managed static hostname, WordPress hostname, CDN resources, and runtime. The managed hostname cannot be selected during creation or removed later. The site-record service queues provisioning and returns its platform job with the create response; the CLI queues through the dedicated provisioning endpoint unless that response explicitly reports `queued: true` with a job ID. Connect a custom domain after provisioning with `domains add` or `domains primary`; the managed hostname remains connected as the fallback. The command prints approved Basic Auth/helper credentials but does not retrieve the WordPress administrator password. Use `sites magic-login` for WordPress access.
 
-If `--migration-file` is supplied, the CLI creates a private version-3 Docker migration artifact before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts, direct signed storage completion, and server-side archive finalization. Archives may be up to 10 GB. If site creation is interrupted after finalization, reuse the reported artifact with `--migration-artifact-id`; it is mutually exclusive with `--migration-file`.
+With `--migration-file`, the CLI creates a private version-3 Docker migration artifact before queueing the site and prints upload metadata with the created site, queue result, and credentials. Uploads use presigned multipart requests with 25 MiB parts, direct signed storage completion, and server-side archive finalization. Archives may be up to 10 GB. If site creation is interrupted after finalization, reuse the reported artifact with `--migration-artifact-id`; it is mutually exclusive with `--migration-file`.
 
 ### `sites update`
 
 Update site metadata.
 
 ```bash
-static-studio sites update <siteId> [--name <name>] [--notes <notes>] [--status <status>]
+static-studio sites update <siteId> (--name <name> | --notes <notes>)
 ```
 
-At least one update option is required.
+Exactly one update option is required. Names use Studio's administrator-only
+Edge service, while notes remain user-owned metadata; issue separate commands
+so one update cannot succeed while the other fails. Site status is managed by
+the platform and cannot be updated directly.
 
 ### `sites delete`
 
@@ -164,13 +179,18 @@ static-studio sites push <siteId> [mode]
 
 ### `sites redeploy`
 
-Redeploy an existing site after uploading a replacement migration archive.
+Redeploy an existing platform site, optionally replacing its WordPress content
+from a migration archive.
 
 ```bash
-static-studio sites redeploy <siteId> --migration-file <path> [--allow-any-zip-name]
+static-studio sites redeploy <siteId> [--migration-file <path> | --migration-artifact-id <id>] [--allow-any-zip-name]
 ```
 
-This legacy replacement flow is available only for existing SpinupWP sites. Docker sites must use managed backup restore or copy.
+With neither migration option, the platform performs an ordinary redeploy. With
+`--migration-file`, the CLI uploads and finalizes a private replacement
+artifact bound to the target site, then queues redeployment from that artifact.
+Use `--migration-artifact-id` to redeploy from an already-finalized artifact
+without uploading again. The two migration options are mutually exclusive.
 
 ### `sites retry`
 
@@ -195,15 +215,6 @@ Queue an idempotent Docker WordPress runtime transition.
 ```bash
 static-studio sites start <siteId>
 static-studio sites stop <siteId>
-```
-
-### `sites runtime-policy`
-
-Keep a Docker WordPress runtime always on or use timed editor sessions.
-
-```bash
-static-studio sites runtime-policy <siteId> always-on
-static-studio sites runtime-policy <siteId> timed
 ```
 
 ### `sites changes`
@@ -231,16 +242,6 @@ static-studio sites cancel-export <siteId> [--yes]
 ```
 
 The site must currently be exporting. The command prompts unless `--yes` is supplied. Rollback exports cannot be cancelled through this command.
-
-### `sites migration-log`
-
-Show the site's migration log.
-
-```bash
-static-studio sites migration-log <siteId>
-```
-
-Plain output prints the log content. JSON output also includes its line count.
 
 ### `sites releases`
 
@@ -295,8 +296,16 @@ The site must have a `pull_zone_id`.
 Add a custom domain and start an export.
 
 ```bash
-static-studio domains add <siteId> <domain>
+static-studio domains add <siteId> <domain> [--prepare-only]
 ```
+
+The command starts WordPress when necessary before changing the domain. By
+default it completes the connection, requests SSL, registers ownership,
+refreshes routing, and starts an export. `--prepare-only` prepares WordPress and
+starts the export before DNS points to Studio, but does not attach the CDN
+hostname, issue SSL, register ownership, or refresh edge routing. Its result
+includes `prepared: true`; run the command again without the flag to finish the
+connection.
 
 ### `domains primary`
 
@@ -834,57 +843,45 @@ static-studio tags remove <siteId> <tagId>
 
 ### `backups list`
 
-List cached backups.
+List the current platform backups.
 
 ```bash
-static-studio backups list <siteId> [--refresh]
+static-studio backups list <siteId>
 ```
-
-`--refresh` queues a backup sync before listing for legacy SpinupWP sites. Docker artifacts are read directly and do not require synchronization.
 
 ### `backups create`
 
-Queue backup creation.
+Queue platform backup creation.
 
 ```bash
 static-studio backups create <siteId>
 ```
 
-The CLI derives the provider from the stored site record. Docker requests use an idempotency UUID and the Docker artifact control plane.
-
-### `backups sync`
-
-Queue backup sync.
-
-```bash
-static-studio backups sync <siteId>
-```
-
-This command is only for legacy SpinupWP sites.
+The request uses an idempotency UUID and the platform artifact control plane.
 
 ### `backups restore`
 
 Queue backup restore.
 
 ```bash
-static-studio backups restore <siteId> [--backup-id <id>] [--date <date>] [--yes]
+static-studio backups restore <siteId> --backup-id <id> [--yes]
 ```
 
-Docker restores require a ready backup UUID and leave WordPress stopped after completion. The command prompts unless `--yes` is supplied.
+Restores require a ready backup UUID and leave WordPress stopped after completion. The command prompts unless `--yes` is supplied.
 
 ### `backups delete`
 
 Queue backup deletion.
 
 ```bash
-static-studio backups delete <siteId> [--backup-id <id>] [--date <date>] [--yes]
+static-studio backups delete <siteId> --backup-id <id> [--yes]
 ```
 
 The command prompts unless `--yes` is supplied.
 
 ### `backups get`
 
-Show one Docker backup artifact's current status.
+Show one platform backup artifact's current status.
 
 ```bash
 static-studio backups get <siteId> <backupId>
@@ -892,7 +889,7 @@ static-studio backups get <siteId> <backupId>
 
 ### `backups download`
 
-Create a short-lived HTTPS URL for a ready Docker backup.
+Create a short-lived HTTPS URL for a ready platform backup.
 
 ```bash
 static-studio backups download <siteId> <backupId>
@@ -900,7 +897,7 @@ static-studio backups download <siteId> <backupId>
 
 ### `backups copy`
 
-Replace another Docker site's WordPress content and database from a ready artifact.
+Replace another platform site's WordPress content and database from a ready artifact.
 
 ```bash
 static-studio backups copy <siteId> <backupId> <targetSiteId> [--yes]
@@ -910,7 +907,7 @@ The authenticated user must administer both sites. The command prompts unless `-
 
 ### `backups policy`
 
-Show or update the Docker scheduled-backup policy.
+Show or update the platform scheduled-backup policy.
 
 ```bash
 static-studio backups policy <siteId>

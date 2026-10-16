@@ -2,7 +2,7 @@
 
 Command-line interface for Static Studio hosting workflows. The package is intended for humans and coding agents such as Codex or Claude Code that need a narrow, scriptable interface to the Static Studio platform.
 
-This documentation covers release `0.2.0`.
+This documentation covers release `0.3.0`.
 
 ## Install
 
@@ -27,6 +27,12 @@ Interactive email OTP login:
 static-studio login --email person@example.com
 ```
 
+Email OTP requests are protected by Cloudflare Turnstile. The CLI prints a
+local challenge URL, attempts to open it in the default browser, and continues
+after the browser returns the short-lived token to its loopback callback. Use
+`--no-browser` to skip automatic browser launch, or pass a token obtained by another trusted flow with
+`--captcha-token <token>`.
+
 Personal Access Token login for CI or agents:
 
 ```bash
@@ -43,6 +49,9 @@ STATIC_STUDIO_ACCESS_TOKEN=... static-studio --json sites list
 
 Sessions are stored in `~/.static-studio/config.json` with `0600` permissions. Use `--profile <name>` to keep separate accounts.
 
+Personal Access Token and saved Supabase session authentication are unchanged
+and do not run the Turnstile browser flow.
+
 ## Core Commands
 
 ```bash
@@ -54,19 +63,17 @@ static-studio sites get <siteId>
 static-studio sites basic-auth <siteId>
 static-studio sites magic-login <siteId>
 static-studio sites debug-log <siteId> --tail 200
-static-studio sites create --name Demo --mount-path /blog
-static-studio sites create --name Import --migration-file ./site-studio-backup.zip
+static-studio sites create --name Import --migration-file ./studio-backup-site.zip
 static-studio sites create --name Import --migration-artifact-id <artifactId>
 static-studio sites runtime-status <siteId>
 static-studio sites start <siteId>
 static-studio sites stop <siteId>
-static-studio sites runtime-policy <siteId> always-on
 static-studio sites push <siteId> full
 static-studio sites push <siteId> changes
-# Legacy SpinupWP sites only:
-static-studio sites redeploy <siteId> --migration-file ./site-studio-backup.zip
+static-studio sites redeploy <siteId>
+static-studio sites redeploy <siteId> --migration-file ./studio-backup-site.zip
+static-studio sites redeploy <siteId> --migration-artifact-id <artifactId>
 static-studio sites cancel-export <siteId> --yes
-static-studio sites migration-log <siteId>
 static-studio sites releases <siteId>
 static-studio sites rollback-status <siteId>
 static-studio sites rollback-snapshots <siteId>
@@ -75,6 +82,7 @@ static-studio sites delete <siteId> --yes
 
 static-studio domains list <siteId>
 static-studio domains add <siteId> example.com
+static-studio domains add <siteId> example.com --prepare-only
 static-studio domains primary <siteId> example.com
 static-studio domains mount <siteId> example.com /docs
 static-studio domains issue-ssl <siteId> example.com
@@ -113,8 +121,10 @@ static-studio backups list <siteId>
 static-studio backups create <siteId>
 static-studio backups get <siteId> <backupId>
 static-studio backups restore <siteId> --backup-id <backupId> --yes
+static-studio backups delete <siteId> --backup-id <backupId> --yes
 static-studio backups download <siteId> <backupId>
 static-studio backups copy <siteId> <backupId> <targetSiteId> --yes
+static-studio backups policy <siteId>
 static-studio backups policy <siteId> daily
 
 static-studio redirects create <siteId> /old /new
@@ -161,9 +171,20 @@ static-studio ssh list <siteId>
 static-studio ssh retry <siteId>
 ```
 
-New sites use the server-assigned Docker provider, managed Studio URLs, PHP 8.2–8.4, and server-generated Basic Auth/helper credentials. WordPress access uses short-lived magic links. New-site migration archives use private Docker artifacts with presigned multipart requests in 25 MiB parts, direct signed completion, and server-side validation, up to the 10 GB limit.
+New sites use the server-assigned Docker provider, managed Studio URLs, PHP 7.4
+or 8.1–8.4, and server-generated Basic Auth/helper credentials. The site-record
+service normally queues platform provisioning and returns its job to the CLI;
+the CLI uses the dedicated queue endpoint only as a compatibility fallback.
+Site creation currently requires either `--migration-file` or
+`--migration-artifact-id`; Studio has temporarily disabled empty-site creation.
+WordPress access uses short-lived magic links.
 
-Existing SpinupWP sites remain provider-bound to their legacy deployment, backup, and replacement-import workflows. Docker replacement imports are intentionally unavailable; use Docker backup restore or copy instead.
+Migration uploads accept `.zip`, `.tar.gz`, `.tgz`, `.wpress`, and `.daf`
+archives. Static Studio backup ZIP names containing `studio-backup-` and
+Duplicator ZIP names ending in `_archive.zip` are accepted directly. New-site
+and replacement uploads use private Docker artifacts with presigned multipart
+requests in 25 MiB parts, direct signed completion, and server-side validation,
+up to the 10 GB limit.
 
 The `--url` option on `performance run` and `performance get` is deprecated. If supplied for compatibility, it must resolve to the site's stored URL.
 

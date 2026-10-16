@@ -9,6 +9,8 @@ export class CliError extends Error {
   status?: number;
   code?: string;
   deliveryAmbiguous?: boolean;
+  canPrepareWithoutDns?: boolean;
+  artifactId?: string;
 
   constructor(
     message: string,
@@ -17,6 +19,8 @@ export class CliError extends Error {
       status?: number;
       code?: string;
       deliveryAmbiguous?: boolean;
+      canPrepareWithoutDns?: boolean;
+      artifactId?: string;
     } = {},
   ) {
     super(message);
@@ -27,6 +31,10 @@ export class CliError extends Error {
     if (metadata.deliveryAmbiguous !== undefined) {
       this.deliveryAmbiguous = metadata.deliveryAmbiguous;
     }
+    if (metadata.canPrepareWithoutDns !== undefined) {
+      this.canPrepareWithoutDns = metadata.canPrepareWithoutDns;
+    }
+    if (metadata.artifactId !== undefined) this.artifactId = metadata.artifactId;
   }
 }
 
@@ -43,6 +51,7 @@ export function cliErrorJson(error: unknown): {
     message: string;
     name: string;
     exitCode: number;
+    artifactId?: string;
   };
 } {
   return {
@@ -50,6 +59,9 @@ export function cliErrorJson(error: unknown): {
       message: cliErrorMessage(error),
       name: error instanceof Error ? error.name : "Error",
       exitCode: cliErrorExitCode(error),
+      ...(error instanceof CliError && error.artifactId
+        ? { artifactId: error.artifactId }
+        : {}),
     },
   };
 }
@@ -63,16 +75,20 @@ export async function resolveFunctionError(error: unknown): Promise<Error> {
         error?: unknown;
         message?: unknown;
         details?: unknown;
+        can_prepare_without_dns?: unknown;
       };
       const message =
-        payload?.error ||
-        payload?.message ||
         payload?.details ||
+        payload?.message ||
+        payload?.error ||
         `${context.status} ${context.statusText}`;
       return new CliError(String(message), 1, {
         status: context.status,
         ...(typeof payload?.code === "string" ? { code: payload.code } : {}),
         deliveryAmbiguous: context.status >= 500,
+        ...(payload?.can_prepare_without_dns === true
+          ? { canPrepareWithoutDns: true }
+          : {}),
       });
     } catch {
       try {

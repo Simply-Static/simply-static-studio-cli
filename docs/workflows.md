@@ -11,6 +11,11 @@ static-studio login --email person@example.com
 static-studio whoami
 ```
 
+The CLI prints a local Cloudflare Turnstile challenge URL and attempts to open
+it before requesting the email code. Use `--no-browser` to skip automatic
+launch, or `--captcha-token <token>` when a trusted integration already has a
+short-lived Turnstile token.
+
 CI or agent usage:
 
 ```bash
@@ -18,6 +23,9 @@ STATIC_STUDIO_ACCESS_TOKEN=... static-studio --json sites list
 ```
 
 Generate the token in Static Studio under **Account -> Access Token**. Token issuance and exchange require an active subscription with quota greater than zero; trial status alone does not exclude an otherwise eligible account. Pass a Personal Access Token without a refresh token.
+
+Personal Access Token and saved Supabase session login do not use the
+Turnstile browser flow.
 
 Multiple accounts:
 
@@ -29,26 +37,13 @@ static-studio --profile client-a sites list
 
 ## Create a Site
 
-Create a generated site:
-
-```bash
-static-studio sites create --name "Demo"
-```
-
-Create a site with custom runtime settings:
-
-```bash
-static-studio sites create \
-  --name "Demo" \
-  --mount-path /blog \
-  --php-version 8.3
-```
-
 Create from a migration archive:
 
 ```bash
 static-studio sites create \
   --name "Imported Site" \
+  --mount-path /blog \
+  --php-version 8.3 \
   --migration-file ./studio-backup-imported-site.zip
 ```
 
@@ -60,7 +55,13 @@ static-studio sites create \
   --migration-artifact-id <artifact-id>
 ```
 
-Studio assigns the Docker provider and generates an opaque, immutable identity for each new site. That identity is shared by the managed static hostname and provisioning resources, and is never derived from the editable site name. Add a custom domain after provisioning; the managed hostname remains connected as the fallback. The create response includes the site record, Docker queue result, approved Basic Auth/helper credentials, and optional private artifact metadata. Use `sites magic-login` instead of a WordPress administrator password. Migration files use private multipart upload in 25 MiB parts, direct signed completion, and server-side finalization, and may be up to 10 GB.
+Studio has temporarily disabled empty-site creation for abuse control, so one
+of `--migration-file` or `--migration-artifact-id` is required.
+
+Studio assigns the Docker provider and generates an opaque, immutable identity for each new site. That identity is shared by the managed static hostname and provisioning resources, and is never derived from the editable site name. The site-record service normally queues provisioning and returns its job in the create response; the CLI uses the dedicated queue endpoint only as a fallback. Add a custom domain after provisioning; the managed hostname remains connected as the fallback. The create response includes the site record, platform queue result, approved Basic Auth/helper credentials, and optional private artifact metadata. Use `sites magic-login` instead of a WordPress administrator password. Migration files use private multipart upload in 25 MiB parts, direct signed completion, and server-side finalization, and may be up to 10 GB.
+
+Supported PHP versions are `7.4`, `8.1`, `8.2`, `8.3`, and `8.4`.
+Migration files may be `.zip`, `.tar.gz`, `.tgz`, `.wpress`, or `.daf`.
 
 ## Operate a Site
 
@@ -87,7 +88,6 @@ static-studio sites retry <siteId>
 static-studio sites changes <siteId>
 static-studio sites clear-cache <siteId>
 static-studio sites cancel-export <siteId> --yes
-static-studio sites migration-log <siteId>
 static-studio sites delete <siteId> --yes
 ```
 
@@ -97,17 +97,24 @@ Control the Docker WordPress runtime:
 static-studio sites runtime-status <siteId>
 static-studio sites start <siteId>
 static-studio sites stop <siteId>
-static-studio sites runtime-policy <siteId> always-on
-static-studio sites runtime-policy <siteId> timed
 ```
 
-Redeploy from a replacement migration archive:
+Redeploy without replacing content:
+
+```bash
+static-studio sites redeploy <siteId>
+```
+
+Redeploy from a replacement migration archive, or reuse an already-finalized
+artifact after an interrupted request:
 
 ```bash
 static-studio sites redeploy <siteId> --migration-file ./studio-backup-site.zip
+static-studio sites redeploy <siteId> --migration-artifact-id <artifact-id>
 ```
 
-Replacement migration uploads are a legacy SpinupWP workflow. For Docker sites, restore or copy a managed Docker backup.
+Replacement uploads are private platform artifacts bound to the target site.
+The file and artifact-ID options are mutually exclusive.
 
 Inspect releases and roll back the static site:
 
@@ -125,13 +132,19 @@ Use a snapshot returned by the status or snapshots command. Rollback changes the
 ```bash
 static-studio domains list <siteId>
 static-studio domains add <siteId> example.com
+static-studio domains add <siteId> example.com --prepare-only
 static-studio domains primary <siteId> example.com
 static-studio domains mount <siteId> example.com /docs
 static-studio domains issue-ssl <siteId> example.com
 static-studio domains remove <siteId> old.example.com
 ```
 
-Adding or changing the primary domain starts an export.
+Adding or changing the primary domain starts an export. A normal `domains add`
+starts WordPress when necessary, connects the hostname, requests SSL, registers
+ownership, and refreshes routing. Use `--prepare-only` to prepare WordPress and
+start the export before DNS points to Studio, without attaching the CDN
+hostname, issuing SSL, registering ownership, or refreshing edge routing. Run
+the command again without the flag to finish the connection.
 
 Move a domain between two sites when you administer both:
 
@@ -148,17 +161,18 @@ static-studio backups list <siteId>
 static-studio backups create <siteId>
 static-studio backups get <siteId> <backupId>
 static-studio backups restore <siteId> --backup-id <backupId> --yes
+static-studio backups delete <siteId> --backup-id <backupId> --yes
 static-studio backups download <siteId> <backupId>
+static-studio backups policy <siteId>
 static-studio backups policy <siteId> daily
 ```
 
-Docker backup artifacts use UUIDs and are read directly. To copy a ready artifact into another Docker site:
+Platform backup artifacts use UUIDs and are listed directly. To copy a ready
+artifact into another platform site:
 
 ```bash
 static-studio backups copy <siteId> <backupId> <targetSiteId> --yes
 ```
-
-For existing SpinupWP sites, `backups sync`, `--refresh`, and date-based restore/delete remain available.
 
 ## Redirects
 

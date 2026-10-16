@@ -1,24 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
   copyPlatformBackup,
+  getPlatformBackup,
   getPlatformBackupDownload,
   getPlatformBackupPolicy,
   getSshInfo,
+  listBackups,
   queueBackup,
   retrySftpReconciliation,
   updatePlatformBackupPolicy,
 } from "./queues.js";
 import { createSupabaseMock } from "./test-utils.js";
 
-describe("provider-aware backups", () => {
-  it("routes Docker mutations through the idempotent platform API", async () => {
-    const { supabase, functionCalls } = createSupabaseMock(
-      {
-        site: {
-          data: { id: "42", hosting_provider: "static-studio-docker" },
-          error: null,
-        },
-      },
+describe("platform backups", () => {
+  it("reads the current snapshot from the consolidated platform API", async () => {
+    const { supabase, functionCalls, calls } = createSupabaseMock({}, { ok: true });
+
+    await listBackups(supabase, "42");
+
+    expect(functionCalls).toEqual([{
+      name: "platform-backups",
+      body: { action: "list", siteId: "42" },
+    }]);
+    expect(calls).toEqual([]);
+  });
+
+  it("queues creation through the idempotent consolidated API", async () => {
+    const { supabase, functionCalls, calls } = createSupabaseMock(
+      {},
       { ok: true, provider: "static-studio-docker" },
     );
 
@@ -31,58 +40,49 @@ describe("provider-aware backups", () => {
       siteId: "42",
     });
     expect((functionCalls[0]?.body as { requestId?: string }).requestId)
-      .toMatch(/^[0-9a-f-]{36}$/);
+      .toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(calls).toEqual([]);
   });
 
-  it("keeps legacy backup queue payloads for existing SpinupWP sites", async () => {
-    const { supabase, functionCalls } = createSupabaseMock(
-      {
-        site: {
-          data: { id: "9", hosting_provider: "spinupwp" },
-          error: null,
-        },
-      },
-      { ok: true },
-    );
+  it("preserves a caller request ID for restore", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({}, { ok: true });
+    const backupId = "11111111-1111-4111-8111-111111111111";
+    const requestId = "22222222-2222-4222-8222-222222222222";
 
     await queueBackup(supabase, "restore", "9", {
-      backupId: "legacy-backup",
-      date: "29 Jul 2026",
-      userId: "user-1",
+      backupId,
+      requestId,
     });
 
     expect(functionCalls).toEqual([{
-      name: "queue-backup",
+      name: "platform-backups",
       body: {
         action: "restore",
         siteId: "9",
-        userId: "user-1",
-        date: "29 Jul 2026",
-        backupId: "legacy-backup",
+        backupId,
+        requestId,
       },
     }]);
   });
 
-  it("rejects legacy synchronization for Docker backup snapshots", async () => {
-    const { supabase, functionCalls } = createSupabaseMock({
-      site: {
-        data: { id: "42", hosting_provider: "static-studio-docker" },
-        error: null,
-      },
-    });
+  it("requires an artifact ID for delete and restore", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({});
 
-    await expect(queueBackup(supabase, "sync", "42"))
-      .rejects.toThrow("read directly");
+    await expect(queueBackup(supabase, "delete", "42"))
+      .rejects.toThrow("backupId is required");
+    await expect(queueBackup(supabase, "restore", "42"))
+      .rejects.toThrow("backupId is required");
     expect(functionCalls).toEqual([]);
   });
 
-  it("exposes Docker download, copy, and automated policy contracts", async () => {
+  it("exposes status, download, copy, and automated policy contracts", async () => {
     const { supabase, functionCalls } = createSupabaseMock(
       {},
       { ok: true },
     );
     const backupId = "11111111-1111-4111-8111-111111111111";
 
+    await getPlatformBackup(supabase, "42", backupId);
     await getPlatformBackupDownload(supabase, "42", backupId);
     await copyPlatformBackup(supabase, "42", backupId, "43");
     await getPlatformBackupPolicy(supabase, "42");
@@ -91,16 +91,22 @@ describe("provider-aware backups", () => {
     expect(functionCalls.map((call) => call.name)).toEqual([
       "platform-backups",
       "platform-backups",
+      "platform-backups",
       "platform-backup-policy",
       "platform-backup-policy",
     ]);
-    expect(functionCalls[1]?.body).toMatchObject({
+    expect(functionCalls[0]?.body).toEqual({
+      action: "status",
+      siteId: "42",
+      backupId,
+    });
+    expect(functionCalls[2]?.body).toMatchObject({
       action: "copy-site",
       siteId: "42",
       backupId,
       targetSiteId: "43",
     });
-    expect(functionCalls[3]?.body).toEqual({
+    expect(functionCalls[4]?.body).toEqual({
       action: "update",
       siteId: "42",
       cadence: "daily",

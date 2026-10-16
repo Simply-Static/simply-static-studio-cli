@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.3.0 - 2026-10-16
+
+### Added
+
+- Cloudflare Turnstile protection for email OTP requests, with a temporary
+  loopback browser flow, `login --no-browser`, and a two-step
+  `login --request-only` / `login --otp <code>` flow for automation.
+  `login --captcha-token <token>` supports trusted integrations. Personal
+  Access Token and Supabase session-token authentication are unchanged.
+- Migration support for `.wpress` and `.daf`, alongside `.zip`, `.tar.gz`, and
+  `.tgz`; Duplicator filenames ending in `_archive.zip` now pass the default ZIP
+  validation.
+- Replacement redeploys from either `--migration-file` or a finalized
+  `--migration-artifact-id`, while a redeploy without either option performs an
+  ordinary platform redeploy.
+- `domains add --prepare-only` for preparing WordPress and an export before
+  completing SSL, ownership registration, and live routing.
+
+### Changed
+
+- New platform sites support PHP 7.4 and PHP 8.1 through 8.4.
+- Site creation consumes the provisioning job queued by the server and uses the
+  dedicated queue endpoint only as a compatibility fallback.
+- Site creation now requires a migration archive or finalized migration
+  artifact while Studio's empty-site abuse-control switch is disabled.
+- Site name and notes updates must be issued separately because names now use
+  Studio's administrator-only Edge service.
+- Backup list, create, restore, delete, status, download, copy, and policy
+  operations now use the current platform backup contracts. Omit the cadence
+  from `backups policy` to read it or pass `daily` or `weekly` to update it;
+  restore and delete require `--backup-id`.
+- Replacement uploads now use private version-3 platform migration artifacts
+  bound to the target site.
+- Removing a secondary custom domain now keeps WordPress aligned with the
+  surviving primary domain.
+
+### Removed
+
+- Retired `sites migration-log` and `sites runtime-policy` commands.
+- Direct site-status changes through `sites update --status`.
+- Legacy `backups sync`, `backups list --refresh`, and date-based restore or
+  delete selectors.
+
+### Library API migration
+
+This is a breaking library update for consumers importing the package API.
+Retired Studio contracts removed the `MigrationLogResult`, `getMigrationLog`,
+`getSiteMigrationSubdomain`, and `updatePlatformRuntimePolicy` exports.
+`createSite` now requires a finalized migration artifact, `updateSite` accepts
+only one of `name` or `notes`, and backup functions use platform backup IDs and
+the current queue payloads. Site types no longer expose retired server-only
+infrastructure fields. CLI users should follow the command changes above.
+
 ## 0.2.0 - 2026-07-29
 
 ### Added
