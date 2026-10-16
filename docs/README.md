@@ -2,7 +2,7 @@
 
 This directory contains the detailed reference for the `static-studio` command line interface.
 
-These pages document release `0.2.0`.
+These pages document release `0.3.0`.
 
 ## Documents
 
@@ -29,6 +29,9 @@ npm install -g @simply-static/static-studio
 static-studio login --email person@example.com
 static-studio sites list
 ```
+
+Email OTP login prints a local Cloudflare Turnstile challenge URL and attempts
+to open it in the browser. Use `--no-browser` to skip automatic launch.
 
 For non-interactive environments, provide a Personal Access Token:
 

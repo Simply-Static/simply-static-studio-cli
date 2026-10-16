@@ -1,6 +1,6 @@
 {
   "name": "@simply-static/static-studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Command-line interface for Static Studio hosting workflows.",
   "license": "MIT",
   "type": "module",
@@ -50,7 +50,7 @@
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.46.2",
+    "@supabase/supabase-js": "2.109.0",
     "commander": "^12.1.0"
   },
   "devDependencies": {
@@ -58,10 +58,10 @@
     "tsup": "^8.2.4",
     "tsx": "^4.22.4",
     "typescript": "^5.5.4",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "esbuild": "^0.28.1",
-    "postcss": "^8.5.24"
+    "postcss": "^8.5.30"
   }
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   cancelExport,
-  getMigrationLog,
   getRollbackStatus,
   listProductionSiteReleases,
   listRollbackSnapshots,
@@ -10,23 +9,13 @@ import {
 import { createSupabaseMock } from "./test-utils.js";
 
 describe("deployment operations", () => {
-  it("invokes the Lagos cancel-export and migration-log contracts", async () => {
-    const { supabase, functionCalls } = createSupabaseMock(
-      {},
-      (name) => name === "migration-log"
-        ? { content: "Migrating\nDone", line_count: 2 }
-        : { status: "cancelling" },
-    );
+  it("invokes the cancel-export contract", async () => {
+    const { supabase, functionCalls } = createSupabaseMock({}, { status: "cancelling" });
 
     await expect(cancelExport(supabase, "42")).resolves.toEqual({ status: "cancelling" });
-    await expect(getMigrationLog(supabase, "42")).resolves.toEqual({
-      content: "Migrating\nDone",
-      line_count: 2,
-    });
 
     expect(functionCalls).toEqual([
       { name: "cancel-export", body: { site_id: "42" } },
-      { name: "migration-log", body: { site_id: "42" } },
     ]);
   });
 

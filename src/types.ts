@@ -43,13 +43,12 @@ export interface SiteRecord {
   storage_zone_id?: string | number | null;
   static_site_id?: string | number | null;
   static_site_record_id?: string | number | null;
-  site_id?: string | number | null;
   mount_path?: string | null;
   bedrock?: boolean | null;
   hosting_provider?: string | null;
   php_version?: string | null;
+  wordpress_base_domain?: string | null;
   is_migrating?: boolean | null;
-  is_docker_migrating?: boolean | null;
   platform?: PlatformSiteState | PlatformSiteState[] | null;
   [key: string]: unknown;
 }
@@ -57,7 +56,6 @@ export interface SiteRecord {
 export interface PlatformSiteState {
   desired_state?: string | null;
   observed_state?: string | null;
-  always_on?: boolean | null;
   [key: string]: unknown;
 }
 

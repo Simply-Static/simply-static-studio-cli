@@ -5,6 +5,22 @@ import { invokeFunction } from "./supabase.js";
 import type { SiteMetaRecord, SiteRecord } from "./types.js";
 import { assertSafeId, environmentSlug, normalizeEnvironmentTitle } from "./validation.js";
 
+const ENVIRONMENT_CLIENT_SELECT = [
+  "id",
+  "created_at",
+  "site_id",
+  "url",
+  "status",
+  "dns_record_id",
+  "static_site_record_id",
+  "pull_zone_id",
+  "storage_zone_id",
+  "export_details",
+  "name",
+  "title",
+  "noindex",
+].join(",");
+
 export interface EnvironmentRecord {
   id: string | number;
   site_id?: string | number;
@@ -129,12 +145,12 @@ export async function resolveEnvironment(
   const slugLookup = environmentSlug(lookup);
   const { data, error } = await supabase
     .from("site_environment")
-    .select("*")
+    .select(ENVIRONMENT_CLIENT_SELECT)
     .eq("site_id", safeSiteId)
     .order("created_at", { ascending: true });
   if (error) throw new CliError(error.message);
 
-  const environments = (data || []) as EnvironmentRecord[];
+  const environments = (data || []) as unknown as EnvironmentRecord[];
   const environment = environments.find((item) => String(item.id) === lookup) ||
     environments.find((item) => String(item.name || "").toLowerCase() === lowerLookup) ||
     environments.find((item) => String(item.name || "").toLowerCase() === slugLookup) ||
@@ -396,7 +412,7 @@ export async function getEnvironmentStatus(
   const safeSiteId = assertSafeId(siteId, "siteId");
   const [{ data: addon, error: addonError }, { data: environments, error: envError }] = await Promise.all([
     supabase.from("addon").select("*").eq("site_id", safeSiteId).maybeSingle(),
-    supabase.from("site_environment").select("*").eq("site_id", safeSiteId).order("created_at", { ascending: true }),
+    supabase.from("site_environment").select(ENVIRONMENT_CLIENT_SELECT).eq("site_id", safeSiteId).order("created_at", { ascending: true }),
   ]);
 
   if (addonError) throw new CliError(addonError.message);
@@ -405,7 +421,7 @@ export async function getEnvironmentStatus(
   return {
     enabled: Boolean((addon as { environments?: boolean } | null)?.environments),
     ...(addon ? { addon } : {}),
-    environments: (environments || []) as EnvironmentRecord[],
+    environments: (environments || []) as unknown as EnvironmentRecord[],
   };
 }
 

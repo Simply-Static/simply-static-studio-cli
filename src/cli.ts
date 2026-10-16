@@ -4,7 +4,12 @@ import { createRequire } from "node:module";
 import { Command } from "commander";
 import { getAccountUsage } from "./account.js";
 import { getSiteAlerts, saveSiteAlerts, sendTestSiteAlert } from "./alerts.js";
-import { loginWithEmail, loginWithToken, logout } from "./auth.js";
+import {
+  loginWithEmail,
+  loginWithToken,
+  logout,
+  requestEmailLoginOtp,
+} from "./auth.js";
 import { getConfigPath } from "./config.js";
 import {
   addDomain,
@@ -17,7 +22,6 @@ import {
 } from "./domains.js";
 import {
   cancelExport,
-  getMigrationLog,
   getRollbackStatus,
   listProductionSiteReleases,
   listRollbackSnapshots,
@@ -99,14 +103,12 @@ import {
   getMagicLoginLink,
   getPlatformSiteLifecycle,
   getSite,
-  getSiteMigrationSubdomain,
   listSites,
   pushSite,
   redeploySite,
   retryFailedDeployment,
   siteSummaryRows,
   updateSite,
-  updatePlatformRuntimePolicy,
   updatePlatformSiteLifecycle,
 } from "./sites.js";
 import { getAuthContext, invokeFunction } from "./supabase.js";
@@ -221,7 +223,10 @@ program
   .command("login")
   .description("sign in with an email OTP, Personal Access Token, or Supabase session token pair")
   .option("--email <email>", "email address for OTP login")
-  .option("--otp <code>", "email OTP code; useful for non-interactive usage")
+  .option("--otp <code>", "verify a previously requested email OTP without requesting another")
+  .option("--request-only", "request an email OTP and exit without verifying it")
+  .option("--captcha-token <token>", "short-lived Cloudflare Turnstile token instead of the local browser flow")
+  .option("--no-browser", "print the local Turnstile URL instead of opening it")
   .option("--token <token>", "Personal Access Token, or Supabase session access token when paired with --refresh-token")
   .option("--refresh-token <token>", "refresh token paired with a Supabase session access token")
   .option("--create-user", "allow Supabase Auth to create a user during OTP login")
@@ -229,19 +234,80 @@ program
     const opts = { ...globals(cmd), ...localOpts } as CommandGlobals & {
       email?: string;
       otp?: string;
+      captchaToken?: string;
+      browser?: boolean;
       token?: string;
       refreshToken?: string;
       createUser?: boolean;
+      requestOnly?: boolean;
     };
-    const profile = opts.token
+    if (opts.refreshToken && !opts.token) {
+      throw new CliError("--refresh-token requires --token.");
+    }
+    if (
+      opts.token !== undefined &&
+      (
+        opts.email !== undefined ||
+        opts.otp !== undefined ||
+        opts.requestOnly ||
+        opts.captchaToken !== undefined ||
+        opts.browser === false ||
+        opts.createUser
+      )
+    ) {
+      throw new CliError(
+        "--token cannot be combined with email OTP login options.",
+      );
+    }
+    if (
+      opts.requestOnly &&
+      (opts.token !== undefined || opts.otp !== undefined)
+    ) {
+      throw new CliError("--request-only cannot be combined with --token or --otp.");
+    }
+    if (
+      opts.otp !== undefined &&
+      (
+        opts.captchaToken !== undefined ||
+        opts.browser === false ||
+        opts.createUser
+      )
+    ) {
+      throw new CliError(
+        "--otp verifies an existing code and cannot be combined with OTP request options.",
+      );
+    }
+    if (opts.requestOnly) {
+      const requested = await requestEmailLoginOtp({
+        ...(opts.email ? { email: opts.email } : {}),
+        ...(opts.captchaToken !== undefined
+          ? { captchaToken: String(opts.captchaToken) }
+          : {}),
+        openBrowser: opts.browser !== false,
+        ...(opts.createUser !== undefined ? { createUser: opts.createUser } : {}),
+        ...(opts.profile ? { profile: opts.profile } : {}),
+      });
+      print(cmd, {
+        message: "Email verification code requested.",
+        email: requested.email,
+      });
+      return;
+    }
+    const profile = opts.token !== undefined
       ? await loginWithToken({
-          token: opts.token,
-          ...(opts.refreshToken ? { refreshToken: opts.refreshToken } : {}),
+          token: String(opts.token),
+          ...(opts.refreshToken !== undefined
+            ? { refreshToken: String(opts.refreshToken) }
+            : {}),
           ...(opts.profile ? { profile: opts.profile } : {}),
         })
       : await loginWithEmail({
           ...(opts.email ? { email: opts.email } : {}),
-          ...(opts.otp ? { otp: opts.otp } : {}),
+          ...(opts.otp !== undefined ? { otp: String(opts.otp) } : {}),
+          ...(opts.captchaToken !== undefined
+            ? { captchaToken: String(opts.captchaToken) }
+            : {}),
+          openBrowser: opts.browser !== false,
           ...(opts.createUser !== undefined ? { createUser: opts.createUser } : {}),
           ...(opts.profile ? { profile: opts.profile } : {}),
         });
@@ -364,23 +430,32 @@ sites
 
 sites
   .command("create")
-  .description("create and queue a new Static Studio site")
+  .description("import and queue a new Static Studio site")
   .option("--name <name>", "site display name")
   .option("--mount-path <path>", "serve the static site below this URL path")
   .option("--php-version <version>", "PHP version", "8.3")
   .option("--migration-file <path>", "upload a migration archive before queueing the site")
   .option("--migration-artifact-id <id>", "resume creation from a finalized Docker migration artifact")
   .option("--allow-any-zip-name", "skip Static Studio backup ZIP filename check")
+  .addHelpText(
+    "after",
+    "\nExactly one of --migration-file or --migration-artifact-id is currently required.\n",
+  )
   .action(async (opts: ParsedOptions, cmd: Command) => {
+    if (opts.migrationFile && opts.migrationArtifactId) {
+      throw new CliError(
+        "Choose either --migration-file or --migration-artifact-id, not both.",
+      );
+    }
+    if (!opts.migrationFile && !opts.migrationArtifactId) {
+      throw new CliError(
+        "Empty site creation is temporarily unavailable. Provide --migration-file or --migration-artifact-id.",
+      );
+    }
     await withAuth(cmd, async ({ supabase, user }) => {
-      if (opts.migrationFile && opts.migrationArtifactId) {
-        throw new CliError(
-          "Choose either --migration-file or --migration-artifact-id, not both.",
-        );
-      }
       const phpVersion = requireAllowedValue(
         String(opts.phpVersion || "8.3"),
-        ["8.2", "8.3", "8.4"] as const,
+        ["7.4", "8.1", "8.2", "8.3", "8.4"] as const,
         "PHP version",
       );
       const mountPath = normalizeMountPath(opts.mountPath);
@@ -396,7 +471,10 @@ sites
       };
 
       if (!opts.migrationFile) {
-        print(cmd, await createSite(supabase, createOptions));
+        print(cmd, await createSite(supabase, {
+          ...createOptions,
+          migrationArtifactId: String(opts.migrationArtifactId),
+        }));
         return;
       }
 
@@ -421,8 +499,16 @@ sites
   .description("update site metadata")
   .option("--name <name>", "new name")
   .option("--notes <notes>", "new notes")
-  .option("--status <status>", "new status")
+  .addHelpText("after", "\nProvide exactly one of --name or --notes.\n")
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    const hasName = opts.name !== undefined;
+    const hasNotes = opts.notes !== undefined;
+    if (!hasName && !hasNotes) {
+      throw new CliError("Provide --name or --notes.");
+    }
+    if (hasName && hasNotes) {
+      throw new CliError("Update --name and --notes in separate commands.");
+    }
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await updateSite(supabase, siteId, opts));
     });
@@ -454,18 +540,28 @@ sites
 
 sites
   .command("redeploy <siteId>")
-  .description("redeploy an existing site")
-  .requiredOption("--migration-file <path>", "upload a replacement migration archive before redeploying")
+  .description("redeploy a Docker site, optionally from a replacement migration archive")
+  .option("--migration-file <path>", "upload a replacement migration archive before redeploying")
+  .option("--migration-artifact-id <id>", "redeploy from an already-finalized migration artifact")
   .option("--allow-any-zip-name", "skip Static Studio backup ZIP filename check")
+  .addHelpText(
+    "after",
+    "\n--migration-file and --migration-artifact-id are mutually exclusive.\n",
+  )
   .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+    if (opts.migrationFile && opts.migrationArtifactId) {
+      throw new CliError(
+        "Choose either --migration-file or --migration-artifact-id, not both.",
+      );
+    }
     await withAuth(cmd, async ({ supabase }) => {
-      let upload: unknown = null;
+      let upload: Awaited<ReturnType<typeof uploadMigrationFile>> | undefined;
+      let migrationArtifactId = opts.migrationArtifactId as string | undefined;
       if (opts.migrationFile) {
-        const subdomain = await getSiteMigrationSubdomain(supabase, siteId);
-        process.stderr.write(`Uploading migration file to ${subdomain}...\n`);
+        process.stderr.write("Uploading replacement migration file...\n");
         upload = await uploadMigrationFile(supabase, {
           filePath: opts.migrationFile,
-          subdomain,
+          siteId,
           allowAnyZipName: Boolean(opts.allowAnyZipName),
           onProgress: ({ loaded, total }) => {
             if (!process.stderr.isTTY || !total) return;
@@ -474,11 +570,31 @@ sites
           },
         });
         if (process.stderr.isTTY) process.stderr.write("\n");
+        if (!upload.artifactId) {
+          throw new CliError(
+            "The replacement upload completed without a migration artifact ID.",
+          );
+        }
+        migrationArtifactId = upload.artifactId;
+        process.stderr.write(
+          `Replacement migration artifact finalized: ${migrationArtifactId}\n`,
+        );
+      }
+
+      let redeploy: unknown;
+      try {
+        redeploy = await redeploySite(supabase, siteId, migrationArtifactId);
+      } catch (error) {
+        if (!upload?.artifactId) throw error;
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new CliError(
+          `Replacement artifact ${upload.artifactId} was finalized, but redeployment could not be confirmed. Check the site before retrying with \`static-studio sites redeploy ${siteId} --migration-artifact-id ${upload.artifactId}\`. ${detail}`,
+        );
       }
 
       print(cmd, {
-        redeploy: await redeploySite(supabase, siteId),
-        upload,
+        redeploy,
+        ...(upload ? { upload } : {}),
       });
     });
   });
@@ -513,26 +629,6 @@ for (const action of ["start", "stop"] as const) {
 }
 
 sites
-  .command("runtime-policy <siteId> <state>")
-  .description("set Docker WordPress runtime policy to always-on or timed")
-  .action(async (siteId: string, state: string, _localOpts: ParsedOptions, cmd: Command) => {
-    const normalized = String(state || "").trim().toLowerCase();
-    if (!["always-on", "timed"].includes(normalized)) {
-      throw new CliError("Runtime policy must be `always-on` or `timed`.");
-    }
-    await withAuth(cmd, async ({ supabase }) => {
-      print(
-        cmd,
-        await updatePlatformRuntimePolicy(
-          supabase,
-          siteId,
-          normalized === "always-on",
-        ),
-      );
-    });
-  });
-
-sites
   .command("changes <siteId>")
   .description("show pending WordPress change count")
   .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
@@ -560,16 +656,6 @@ sites
     }
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await cancelExport(supabase, siteId));
-    });
-  });
-
-sites
-  .command("migration-log <siteId>")
-  .description("show the site's migration log")
-  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
-    await withAuth(cmd, async ({ supabase }) => {
-      const result = await getMigrationLog(supabase, siteId);
-      print(cmd, globals(cmd).json ? result : result.content);
     });
   });
 
@@ -630,9 +716,12 @@ domains
 domains
   .command("add <siteId> <domain>")
   .description("add a custom domain and start an export")
-  .action(async (siteId: string, domain: string, _localOpts: ParsedOptions, cmd: Command) => {
+  .option("--prepare-only", "update WordPress before DNS points to Static Studio")
+  .action(async (siteId: string, domain: string, opts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await addDomain(supabase, siteId, domain));
+      print(cmd, await addDomain(supabase, siteId, domain, {
+        prepareOnly: Boolean(opts.prepareOnly),
+      }));
     });
   });
 
@@ -1306,47 +1395,42 @@ const backups = program.command("backups").description("manage site backups");
 
 backups
   .command("list <siteId>")
-  .description("list cached backups")
-  .option("--refresh", "queue a backup sync before listing")
-  .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
+  .description("list current platform backups")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
-      print(cmd, await listBackups(supabase, siteId, Boolean(opts.refresh)));
+      print(cmd, await listBackups(supabase, siteId));
     });
   });
 
-for (const action of ["create", "sync"] as const) {
-  backups
-    .command(`${action} <siteId>`)
-    .description(`${action === "create" ? "queue backup creation" : "queue backup sync"}`)
-    .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
-      await withAuth(cmd, async ({ supabase, user }) => {
-        print(cmd, await queueBackup(supabase, action, siteId, { userId: user.id }));
-      });
+backups
+  .command("create <siteId>")
+  .description("queue platform backup creation")
+  .action(async (siteId: string, _localOpts: ParsedOptions, cmd: Command) => {
+    await withAuth(cmd, async ({ supabase }) => {
+      print(cmd, await queueBackup(supabase, "create", siteId));
     });
-}
+  });
 
 for (const action of ["restore", "delete"] as const) {
   backups
     .command(`${action} <siteId>`)
-    .description(`queue backup ${action}`)
-    .option("--backup-id <id>", "backup ID")
-    .option("--date <date>", "backup date_string")
+    .description(`queue platform backup ${action}`)
+    .requiredOption("--backup-id <id>", "backup ID")
     .option("-y, --yes", "skip confirmation")
     .action(async (siteId: string, opts: ParsedOptions, cmd: Command) => {
       if (
         !opts.yes &&
         !(await confirm(
           action === "restore"
-            ? `Restore backup ${opts.backupId || opts.date || ""} to site ${siteId}?`
-            : `Delete backup ${opts.backupId || opts.date || ""} from site ${siteId}?`,
+            ? `Restore backup ${opts.backupId} to site ${siteId}?`
+            : `Delete backup ${opts.backupId} from site ${siteId}?`,
         ))
       ) {
         throw new CliError("Cancelled.", 0);
       }
-      await withAuth(cmd, async ({ supabase, user }) => {
+      await withAuth(cmd, async ({ supabase }) => {
         print(cmd, await queueBackup(supabase, action, siteId, {
-          ...opts,
-          userId: user.id,
+          backupId: opts.backupId,
         }));
       });
     });
@@ -1354,7 +1438,7 @@ for (const action of ["restore", "delete"] as const) {
 
 backups
   .command("get <siteId> <backupId>")
-  .description("show Docker backup artifact status")
+  .description("show platform backup artifact status")
   .action(async (siteId: string, backupId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       print(cmd, await getPlatformBackup(supabase, siteId, backupId));
@@ -1363,7 +1447,7 @@ backups
 
 backups
   .command("download <siteId> <backupId>")
-  .description("create a short-lived Docker backup download URL")
+  .description("create a short-lived platform backup download URL")
   .action(async (siteId: string, backupId: string, _localOpts: ParsedOptions, cmd: Command) => {
     await withAuth(cmd, async ({ supabase }) => {
       const result = await getPlatformBackupDownload(supabase, siteId, backupId) as {
@@ -1378,7 +1462,7 @@ backups
 
 backups
   .command("copy <siteId> <backupId> <targetSiteId>")
-  .description("copy a ready Docker backup into another Docker site")
+  .description("copy a ready platform backup into another platform site")
   .option("-y, --yes", "skip confirmation")
   .action(async (
     siteId: string,
@@ -1403,7 +1487,7 @@ backups
 
 backups
   .command("policy <siteId> [cadence]")
-  .description("show or update Docker automated backup cadence")
+  .description("show or update platform automated backup cadence")
   .action(async (
     siteId: string,
     cadence: string | undefined,

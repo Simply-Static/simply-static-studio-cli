@@ -8,6 +8,7 @@ import {
   resolveSessionTokenAuth,
 } from "./supabase.js";
 import { prompt } from "./prompt.js";
+import { normalizeTurnstileToken, requestTurnstileToken } from "./turnstile.js";
 import type { StoredProfile } from "./types.js";
 
 function userSummary(user: { id: string; email?: string | null }): { id: string; email?: string } {
@@ -51,36 +52,94 @@ export async function loginWithToken(options: {
   return profile;
 }
 
-export async function loginWithEmail(options: {
+export interface EmailLoginOptions {
   email?: string;
   otp?: string;
   createUser?: boolean;
+  captchaToken?: string;
+  openBrowser?: boolean;
   profile?: string;
-}): Promise<StoredProfile> {
+}
+
+async function emailLoginContext(options: EmailLoginOptions): Promise<{
+  email: string;
+  profileName: string;
+  supabase: ReturnType<typeof createStaticStudioClient>;
+}> {
   const { config, profileName } = await getProfile(options.profile);
   const supabase = createStaticStudioClient(getSupabaseConfig(config));
   const email = options.email || (await prompt("Email: "));
+  return { email, profileName, supabase };
+}
 
-  const { error: signInError } = await supabase.auth.signInWithOtp({
+async function sendEmailLoginOtp(
+  supabase: ReturnType<typeof createStaticStudioClient>,
+  email: string,
+  options: EmailLoginOptions,
+): Promise<void> {
+  const captchaToken = options.captchaToken
+    ? normalizeTurnstileToken(options.captchaToken)
+    : await requestTurnstileToken({
+        action: options.createUser ? "studio_signup" : "studio_login",
+        ...(options.openBrowser !== undefined
+          ? { openBrowser: options.openBrowser }
+          : {}),
+      });
+
+  await requestEmailOtp(supabase, {
     email,
-    options: {
-      shouldCreateUser: Boolean(options.createUser),
-    },
+    createUser: Boolean(options.createUser),
+    captchaToken,
   });
 
-  if (signInError) {
-    throw new CliError(signInError.message);
+  process.stderr.write("A 6-digit code was sent to your email.\n");
+}
+
+export async function requestEmailLoginOtp(
+  options: Omit<EmailLoginOptions, "otp">,
+): Promise<{ email: string }> {
+  const { email, supabase } = await emailLoginContext(options);
+  await sendEmailLoginOtp(supabase, email, options);
+  return { email };
+}
+
+export async function loginWithEmail(options: EmailLoginOptions): Promise<StoredProfile> {
+  const { email, profileName, supabase } = await emailLoginContext(options);
+  let token = options.otp;
+  if (token === undefined) {
+    await sendEmailLoginOtp(supabase, email, options);
+    token = await prompt("Code: ");
   }
 
-  process.stderr.write("A 6-digit code was sent to your email.\n");
-  const token = options.otp || (await prompt("Code: "));
+  const session = await verifyEmailOtp(supabase, { email, token });
+  const mfaSession = await maybeVerifyMfa(supabase, session);
+
+  const profile: StoredProfile = {
+    accessToken: mfaSession.access_token,
+    refreshToken: mfaSession.refresh_token,
+    ...(mfaSession.expires_at ? { expiresAt: mfaSession.expires_at } : {}),
+    ...(mfaSession.token_type ? { tokenType: mfaSession.token_type } : {}),
+    user: userSummary(mfaSession.user),
+  };
+  await setProfile(profile, profileName);
+  return profile;
+}
+
+export async function verifyEmailOtp(
+  supabase: ReturnType<typeof createStaticStudioClient>,
+  options: { email: string; token: string },
+): Promise<Session> {
+  const token = options.token.trim();
+  if (!token) {
+    throw new CliError("Email verification code is required.");
+  }
 
   let session: Session | null = null;
   let lastError: Error | null = null;
   for (const type of ["email", "invite", "signup"] as const) {
     const { data, error } = await supabase.auth.verifyOtp({
-      email,
-      token: token.trim(),
+      email: options.email,
+      token,
       type,
     });
 
@@ -95,18 +154,27 @@ export async function loginWithEmail(options: {
   if (!session) {
     throw new CliError(lastError?.message || "Invalid email verification code.");
   }
+  return session;
+}
 
-  const mfaSession = await maybeVerifyMfa(supabase, session);
-
-  const profile: StoredProfile = {
-    accessToken: mfaSession.access_token,
-    refreshToken: mfaSession.refresh_token,
-    ...(mfaSession.expires_at ? { expiresAt: mfaSession.expires_at } : {}),
-    ...(mfaSession.token_type ? { tokenType: mfaSession.token_type } : {}),
-    user: userSummary(mfaSession.user),
-  };
-  await setProfile(profile, profileName);
-  return profile;
+export async function requestEmailOtp(
+  supabase: ReturnType<typeof createStaticStudioClient>,
+  options: {
+    email: string;
+    createUser?: boolean;
+    captchaToken: string;
+  },
+): Promise<void> {
+  const { error } = await supabase.auth.signInWithOtp({
+    email: options.email,
+    options: {
+      shouldCreateUser: Boolean(options.createUser),
+      captchaToken: normalizeTurnstileToken(options.captchaToken),
+    },
+  });
+  if (error) {
+    throw new CliError(error.message);
+  }
 }
 
 async function maybeVerifyMfa(
@@ -120,7 +188,9 @@ async function maybeVerifyMfa(
     const level = String(raw?.currentLevel || raw?.current_level || "").toLowerCase();
     requiresMfa = level !== "aal2";
   } catch {
-    requiresMfa = false;
+    // Match Studio's browser flow: an assurance-level lookup failure must not
+    // silently downgrade a session that may require MFA.
+    requiresMfa = true;
   }
 
   if (!requiresMfa) {

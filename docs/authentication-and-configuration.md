@@ -4,7 +4,8 @@
 
 - Node.js 20 or newer.
 - A Static Studio account.
-- Network access to the configured Supabase project and Static Studio edge functions.
+- Network access to the configured Supabase project, Static Studio edge
+  functions, and `https://challenges.cloudflare.com` for email login.
 
 Install the published package globally:
 
@@ -38,12 +39,43 @@ static-studio [--json] [--profile <name>] <command>
 
 ## Login Methods
 
-Interactive or OTP email login:
+Interactive email OTP login:
 
 ```bash
 static-studio login --email person@example.com
+```
+
+Before requesting the email code, the CLI starts a temporary HTTP server bound
+only to `127.0.0.1`, prints its Cloudflare Turnstile challenge URL, attempts to
+open it in the default browser, and waits for the browser to return a
+short-lived security token. The challenge times out after five minutes and the
+loopback server closes when it completes or fails.
+
+Open the printed `127.0.0.1` URL in a browser that shares the CLI's network
+namespace. Remote SSH sessions and containers may require loopback port
+forwarding; otherwise use a trusted CAPTCHA-token flow or a Personal Access
+Token.
+
+To open the printed URL yourself, disable automatic browser launch:
+
+```bash
+static-studio login --email person@example.com --no-browser
+```
+
+For a two-step or non-interactive login, first request a code. A trusted
+integration can supply its own short-lived Turnstile token instead of using the
+local browser flow:
+
+```bash
+static-studio login \
+  --email person@example.com \
+  --request-only \
+  --captcha-token "$STATIC_STUDIO_CAPTCHA_TOKEN"
 static-studio login --email person@example.com --otp 123456
 ```
+
+`--otp` verifies a code that was already requested and deliberately does not
+request a replacement code or start another Turnstile challenge.
 
 Personal Access Token login:
 
@@ -55,12 +87,19 @@ Generate Personal Access Tokens in the Static Studio app under **Account -> Acce
 
 The CLI exchanges a Personal Access Token through the platform `access-token` Edge Function for a short-lived Supabase access token. Personal Access Tokens do not have refresh tokens, and the exchange response intentionally does not include one.
 
+Turnstile applies only when requesting an email OTP. Personal Access Token and
+Supabase session-token login do not start a browser challenge and otherwise
+keep their existing behavior.
+
 Options:
 
 | Option | Description |
 | --- | --- |
 | `--email <email>` | Email address for OTP login. |
-| `--otp <code>` | OTP code for non-interactive email login. |
+| `--otp <code>` | Verify a previously requested email OTP without requesting another code or running Turnstile. |
+| `--request-only` | Complete Turnstile, request an email OTP, and exit without prompting for the code. |
+| `--captcha-token <token>` | Short-lived Cloudflare Turnstile token to use instead of starting the local browser flow. |
+| `--no-browser` | Print the loopback Turnstile URL instead of trying to open it automatically. |
 | `--token <token>` | Personal Access Token to store instead of starting OTP login. Supabase session access tokens are also supported when paired with `--refresh-token`. |
 | `--refresh-token <token>` | Refresh token paired with a Supabase session access token. Do not use this with a Personal Access Token. |
 | `--create-user` | Allow Supabase Auth to create a user during OTP login. |
@@ -92,11 +131,17 @@ static-studio --profile agency logout
 | --- | --- |
 | `STATIC_STUDIO_ACCESS_TOKEN` | Personal Access Token used directly for the current command. Supabase session access tokens are also supported. When set, the CLI does not require a saved profile. |
 | `STATIC_STUDIO_REFRESH_TOKEN` | Refresh token paired with a Supabase session access token. Do not use this with a Personal Access Token. |
+| `STATIC_STUDIO_TURNSTILE_SITE_KEY` | Override the Cloudflare Turnstile site key used by the local email-login challenge. |
 | `STATIC_STUDIO_CONFIG_DIR` | Directory that contains `config.json`; defaults to `~/.static-studio`. |
 | `STATIC_STUDIO_SUPABASE_URL` | Override the Supabase URL in local config. |
 | `STATIC_STUDIO_SUPABASE_ANON_KEY` | Override the Supabase anon key in local config. |
 
 Environment tokens take precedence over saved profile tokens.
+
+A Turnstile site-key override must authorize `127.0.0.1` and match the secret
+configured for the selected Supabase project. Treat `--otp` and
+`--captcha-token` values as secrets: command-line values may be recorded in
+shell history or visible to local process inspection.
 
 ## Auth Checks
 

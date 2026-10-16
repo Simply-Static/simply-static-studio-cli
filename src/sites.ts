@@ -32,6 +32,10 @@ export interface CreateSiteWithMigrationOptions extends CreateSiteOptions {
   onUploadProgress?: UploadMigrationOptions["onProgress"];
 }
 
+export type CreateSiteFromArtifactOptions = CreateSiteOptions & {
+  migrationArtifactId: string;
+};
+
 export interface CreateSiteResult {
   site: SiteRecord;
   queue: unknown;
@@ -40,14 +44,16 @@ export interface CreateSiteResult {
     identifier?: string;
     managed_url?: string;
     admin_url?: string;
+    static_url?: string;
+    queued?: boolean;
+    job?: unknown;
+    error?: string | null;
   };
 }
 
 const SITE_CLIENT_SELECT = [
   "id",
   "created_at",
-  "site_id",
-  "server_id",
   "url",
   "managed_url",
   "provisioning_id",
@@ -55,16 +61,13 @@ const SITE_CLIENT_SELECT = [
   "status",
   "notes",
   "dns_record_id",
-  "event_id",
   "static_site_record_id",
   "pull_zone_id",
   "storage_zone_id",
   "export_details",
   "migration_details",
-  "backup_last_checked_at",
   "initial_export_done",
   "is_migrating",
-  "is_docker_migrating",
   "custom_domain",
   "hp_webhook_pending",
   "bedrock",
@@ -78,9 +81,9 @@ const SITE_CLIENT_SELECT = [
   "migration_upload_error",
   "migration_upload_attempts",
   "migration_upload_updated_at",
-  "hosting_provider",
   "php_version",
-  "platform:platform_site(desired_state,observed_state,always_on)",
+  "wordpress_base_domain",
+  "platform:platform_site(desired_state,observed_state)",
 ].join(",");
 
 type PreparedSiteProvisioning = {
@@ -89,12 +92,12 @@ type PreparedSiteProvisioning = {
   phpVersion: (typeof PLATFORM_PHP_VERSIONS)[number];
 };
 
-const PLATFORM_PHP_VERSIONS = ["8.2", "8.3", "8.4"] as const;
+const PLATFORM_PHP_VERSIONS = ["7.4", "8.1", "8.2", "8.3", "8.4"] as const;
 const CANONICAL_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function normalizeSiteName(value: string | undefined): string {
-  const name = String(value || randomDomainWord()).trim();
+  const name = value === undefined ? randomDomainWord() : String(value).trim();
   if (!name || name.length > 200 || /[\u0000-\u001f\u007f]/.test(name)) {
     throw new CliError("Site name must be between 1 and 200 printable characters.");
   }
@@ -271,15 +274,19 @@ export async function getMagicLoginLink(
 
 export async function createSite(
   supabase: SupabaseClient,
-  options: CreateSiteOptions,
+  options: CreateSiteFromArtifactOptions,
 ): Promise<CreateSiteResult> {
-  const migrationArtifactId = options.migrationArtifactId
-    ? normalizeMigrationArtifactId(options.migrationArtifactId)
-    : undefined;
+  const prepared = prepareSiteProvisioning(options);
+  if (!options.migrationArtifactId) {
+    throw new CliError(
+      "Empty site creation is temporarily unavailable. Provide a migration archive or finalized migration artifact.",
+    );
+  }
+  const migrationArtifactId = normalizeMigrationArtifactId(options.migrationArtifactId);
   return provisionSite(
     supabase,
     options,
-    prepareSiteProvisioning(options),
+    prepared,
     migrationArtifactId,
   );
 }
@@ -339,7 +346,7 @@ async function provisionSite(
   supabase: SupabaseClient,
   options: CreateSiteOptions,
   prepared: PreparedSiteProvisioning,
-  migrationArtifactId?: string,
+  migrationArtifactId: string,
 ): Promise<CreateSiteResult> {
   const { name, mountPath, phpVersion } = prepared;
 
@@ -356,10 +363,9 @@ async function provisionSite(
       mount_path: mountPath,
       platform_canary: true,
       phpVersion,
-      ...(migrationArtifactId ? { migration_artifact_id: migrationArtifactId } : {}),
+      migration_artifact_id: migrationArtifactId,
     });
   } catch (error) {
-    if (!migrationArtifactId) throw error;
     const detail = error instanceof Error ? error.message : String(error);
     throw new CliError(
       `Site creation for migration artifact ${migrationArtifactId} could not be confirmed. Check sites list before retrying with --migration-artifact-id ${migrationArtifactId}. ${detail}`,
@@ -375,18 +381,29 @@ async function provisionSite(
       `Site ${siteId} was created without the required Docker provider; deployment was not queued.`,
     );
   }
-  let queue: unknown;
-  try {
-    queue = await invokeFunction(supabase, "queue-platform-site", {
-      site_id: siteId,
-      apiVersion: PLATFORM_PROVISIONING_API_VERSION,
-      phpVersion,
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new CliError(
-      `Site ${siteId} was created, but deployment could not be queued. ${detail}`,
-    );
+  const serverJob = recordResult.provisioning?.job;
+  let queue: unknown = recordResult.provisioning?.queued === true &&
+      serverJob &&
+      typeof serverJob === "object" &&
+      "id" in serverJob &&
+      Boolean(serverJob.id)
+    ? serverJob
+    : undefined;
+  if (!queue) {
+    try {
+      queue = await invokeFunction(supabase, "queue-platform-site", {
+        site_id: siteId,
+        apiVersion: PLATFORM_PROVISIONING_API_VERSION,
+        phpVersion,
+      });
+    } catch (error) {
+      const fallbackDetail = error instanceof Error ? error.message : String(error || "");
+      const detail = fallbackDetail || recordResult.provisioning?.error ||
+        "Deployment could not be queued.";
+      throw new CliError(
+        `Site ${siteId} was created, but deployment could not be queued. ${detail}`,
+      );
+    }
   }
 
   let meta: SiteMetaRecord;
@@ -427,25 +444,51 @@ function publicCredentialsFromMeta(meta: SiteMetaRecord): Record<string, string>
 export async function updateSite(
   supabase: SupabaseClient,
   siteId: string,
-  changes: { name?: string; notes?: string; status?: string },
+  changes: { name?: string; notes?: string },
 ): Promise<SiteRecord> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  const update: Record<string, string> = {};
-  if (changes.name !== undefined) update.name = changes.name;
-  if (changes.notes !== undefined) update.notes = changes.notes;
-  if (changes.status !== undefined) update.status = changes.status;
-  if (Object.keys(update).length === 0) {
+  if (Object.prototype.hasOwnProperty.call(changes, "status")) {
+    throw new CliError("Site status cannot be updated directly.");
+  }
+  if (changes.name === undefined && changes.notes === undefined) {
     throw new CliError("No changes supplied.");
   }
+  if (changes.name !== undefined && changes.notes !== undefined) {
+    throw new CliError(
+      "Update the site name and notes in separate commands to avoid partial changes.",
+    );
+  }
 
-  const { data, error } = await supabase
-    .from("site")
-    .update(update)
-    .eq("id", safeSiteId)
-    .select(SITE_CLIENT_SELECT)
-    .single();
-  if (error) throw new CliError(error.message);
-  return data as unknown as SiteRecord;
+  let updated: SiteRecord | undefined;
+  if (changes.name !== undefined) {
+    const name = normalizeSiteName(changes.name);
+    const result = await invokeFunction<{ site?: SiteRecord }>(
+      supabase,
+      "update-site-name",
+      { site_id: safeSiteId, name },
+    );
+    if (
+      !result?.site ||
+      String(result.site.id) !== safeSiteId ||
+      result.site.name !== name
+    ) {
+      throw new CliError("The site-name update returned an invalid response.");
+    }
+    updated = result.site;
+  }
+
+  if (changes.notes !== undefined) {
+    const { data, error } = await supabase
+      .from("site")
+      .update({ notes: changes.notes })
+      .eq("id", safeSiteId)
+      .select(SITE_CLIENT_SELECT)
+      .single();
+    if (error) throw new CliError(error.message);
+    updated = data as unknown as SiteRecord;
+  }
+
+  return updated!;
 }
 
 export async function deleteSite(supabase: SupabaseClient, siteId: string): Promise<unknown> {
@@ -473,17 +516,6 @@ export async function updatePlatformSiteLifecycle(
   return invokeFunction(supabase, "platform-site-lifecycle", {
     site_id: assertSafeId(siteId, "siteId"),
     action,
-  });
-}
-
-export async function updatePlatformRuntimePolicy(
-  supabase: SupabaseClient,
-  siteId: string,
-  alwaysOn: boolean,
-): Promise<unknown> {
-  return invokeFunction(supabase, "platform-runtime-policy", {
-    site_id: assertSafeId(siteId, "siteId"),
-    always_on: alwaysOn,
   });
 }
 
@@ -519,41 +551,20 @@ export async function pushSite(
   return exportSite(supabase, siteId, sitePushModeToExportType(mode));
 }
 
-export async function redeploySite(supabase: SupabaseClient, siteId: string): Promise<unknown> {
-  const site = await getSite(supabase, siteId);
-  if (site.hosting_provider === PLATFORM_HOSTING_PROVIDER) {
-    throw new CliError(
-      "Replacement migration uploads are not available for Docker sites. Restore a Docker backup instead.",
-    );
-  }
-  return invokeFunction(supabase, "redeploy-site", { site_id: siteId });
-}
-
-export async function getSiteMigrationSubdomain(
+export async function redeploySite(
   supabase: SupabaseClient,
   siteId: string,
-): Promise<string> {
-  const site = await getSite(supabase, siteId);
-  if (site.hosting_provider === PLATFORM_HOSTING_PROVIDER) {
-    throw new CliError(
-      "Replacement migration uploads are not available for Docker sites. Restore a Docker backup instead.",
-    );
-  }
-  const meta = await getSiteMeta(supabase, siteId);
-  const adminUrl = meta.admin_url;
-  if (adminUrl) {
-    const match = adminUrl.match(/^https?:\/\/(?:wp[.-])?([^.]+)\./i);
-    if (match?.[1]) {
-      return match[1];
-    }
-  }
-
-  const host = String(site.url || "").replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
-  const subdomain = host.split(".")[0];
-  if (!subdomain) {
-    throw new CliError(`Could not determine migration upload subdomain for site ${siteId}.`);
-  }
-  return subdomain;
+  migrationArtifactId?: string,
+): Promise<unknown> {
+  const safeSiteId = assertSafeId(siteId, "siteId");
+  const artifactId = migrationArtifactId === undefined
+    ? undefined
+    : normalizeMigrationArtifactId(migrationArtifactId);
+  return invokeFunction(supabase, "redeploy-site", {
+    site_id: safeSiteId,
+    apiVersion: PLATFORM_PROVISIONING_API_VERSION,
+    ...(artifactId ? { migration_artifact_id: artifactId } : {}),
+  });
 }
 
 export async function retryFailedDeployment(supabase: SupabaseClient, siteId: string): Promise<unknown> {
@@ -586,14 +597,10 @@ export function siteSummaryRows(sites: SiteRecord[]): Record<string, unknown>[] 
       url: baseUrl ? `${baseUrl}${mountPath}` : site.url,
       ...(mountPath ? { base_url: site.url, mount_path: mountPath } : {}),
       status: site.status,
-      ...(site.hosting_provider
-        ? { hosting_provider: site.hosting_provider }
-        : {}),
-      ...(site.hosting_provider === PLATFORM_HOSTING_PROVIDER
+      ...(platform
         ? {
           desired_state: platform?.desired_state ?? null,
           observed_state: platform?.observed_state ?? null,
-          always_on: platform?.always_on === true,
         }
         : {}),
       created_at: site.created_at,

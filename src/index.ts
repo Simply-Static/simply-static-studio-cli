@@ -16,6 +16,7 @@ export * from "./reports.js";
 export * from "./sites.js";
 export * from "./tags.js";
 export * from "./team.js";
+export * from "./turnstile.js";
 export * from "./types.js";
 export * from "./upload.js";
 export * from "./users.js";

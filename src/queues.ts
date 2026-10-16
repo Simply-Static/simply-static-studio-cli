@@ -1,51 +1,51 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { PLATFORM_HOSTING_PROVIDER } from "./constants.js";
 import { CliError } from "./errors.js";
-import { getSite } from "./sites.js";
 import { invokeFunction, invokeIdempotentFunction } from "./supabase.js";
 import { assertSafeId, parsePositiveInteger } from "./validation.js";
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function platformBackupRequestId(value?: string): string {
+  const requestId = value === undefined ? crypto.randomUUID() : String(value).trim();
+  if (!UUID_V4_RE.test(requestId)) {
+    throw new CliError("requestId must be a canonical lowercase UUIDv4.");
+  }
+  return requestId;
+}
 
 export async function listBackups(
   supabase: SupabaseClient,
   siteId: string,
-  refresh = false,
 ): Promise<unknown> {
-  return invokeFunction(supabase, "list-backups", { siteId: assertSafeId(siteId, "siteId"), refresh });
+  return invokeFunction(supabase, "platform-backups", {
+    action: "list",
+    siteId: assertSafeId(siteId, "siteId"),
+  });
 }
 
 export async function queueBackup(
   supabase: SupabaseClient,
-  action: "create" | "delete" | "restore" | "sync",
+  action: "create" | "delete" | "restore",
   siteId: string,
   options: {
-    date?: string;
     backupId?: string;
-    userId?: string;
     requestId?: string;
   } = {},
 ): Promise<unknown> {
   const safeSiteId = assertSafeId(siteId, "siteId");
-  const site = await getSite(supabase, safeSiteId);
-  if (site.hosting_provider === PLATFORM_HOSTING_PROVIDER) {
-    if (action === "sync") {
-      throw new CliError(
-        "Docker backups are read directly and do not use SpinupWP reconciliation.",
-      );
-    }
-    const requestId = options.requestId || crypto.randomUUID();
-    return invokeIdempotentFunction(supabase, "platform-backups", {
-      action,
-      siteId: safeSiteId,
-      ...(options.backupId ? { backupId: options.backupId } : {}),
-      requestId,
-    });
+  const backupId = options.backupId
+    ? assertSafeId(options.backupId, "backupId")
+    : undefined;
+  if (action !== "create" && !backupId) {
+    throw new CliError(`backupId is required to ${action} a backup.`);
   }
-  return invokeFunction(supabase, "queue-backup", {
+
+  return invokeIdempotentFunction(supabase, "platform-backups", {
     action,
     siteId: safeSiteId,
-    ...(options.userId ? { userId: options.userId } : {}),
-    date: options.date,
-    backupId: options.backupId,
+    ...(backupId ? { backupId } : {}),
+    requestId: platformBackupRequestId(options.requestId),
   });
 }
 
@@ -84,7 +84,7 @@ export async function copyPlatformBackup(
     siteId: assertSafeId(siteId, "siteId"),
     backupId: assertSafeId(backupId, "backupId"),
     targetSiteId: assertSafeId(targetSiteId, "targetSiteId"),
-    requestId: crypto.randomUUID(),
+    requestId: platformBackupRequestId(),
   });
 }
 
